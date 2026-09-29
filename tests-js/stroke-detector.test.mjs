@@ -57,9 +57,11 @@ test('requires a completed minimum-travel downswing before reporting impact', ()
   assert.equal(results.some(result => result.event), false);
 });
 
-test('accepts points inside an oval hit boundary and rejects points outside either axis', () => {
+test('accepts points anywhere inside a rectangular hit boundary and rejects points outside either axis', () => {
   const boundary = { x: 0.5, y: 0.55, width: 0.4, height: 0.2 };
   assert.equal(isWithinBoundary({ x: 0.5, y: 0.65 }, boundary, 640, 480), true);
   assert.equal(isWithinBoundary({ x: 0.5, y: 0.66 }, boundary, 640, 480), false);
+  // The corners are included; an oval would reject this point.
+  assert.equal(isWithinBoundary({ x: 0.649, y: 0.65 }, boundary, 640, 480), true);
   assert.equal(isWithinBoundary({ x: 0.95, y: 0.55 }, boundary, 640, 480), false);
 });

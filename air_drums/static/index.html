@@ -84,7 +84,7 @@
           <label class="check"><input id="showRaw" type="checkbox"> Show raw pose points</label>
           <div class="layout-actions">
             <button class="secondary" id="layoutEdit" type="button" aria-pressed="false">Edit layout</button>
-            <button class="secondary" id="boundaryEdit" type="button" aria-pressed="false">Edit hit oval</button>
+            <button class="secondary" id="boundaryEdit" type="button" aria-pressed="false">Edit hit rectangle</button>
             <button id="layoutSave" type="button" disabled>Save kit</button>
             <button class="secondary" id="layoutReset" type="button">Reset zones</button>
           </div>
@@ -103,7 +103,7 @@
         <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
       </div>
-      <p class="hint">Move your wrists down and let them rebound. A hit counts only when its impact point lands inside the outlined oval. Select <strong>Edit hit oval</strong> to move it or drag any bounding-box handle to resize it. Stroke summaries are kept in local, session-grouped SQLite storage; raw camera frames and per-frame landmarks are not recorded.</p>
+      <p class="hint">Move your wrists down and let them rebound. A hit counts only when its impact point lands inside the outlined rectangle. Select <strong>Edit hit rectangle</strong> to move it or drag any bounding-box handle to resize it. Stroke summaries are kept in local, session-grouped SQLite storage; raw camera frames and per-frame landmarks are not recorded.</p>
       <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
       <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>

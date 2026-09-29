@@ -350,7 +350,7 @@ function drawStrikeBoundary(width, height) {
   const ry = boundary.height * Math.min(width, height) / 2;
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.rect(cx - rx, cy - ry, rx * 2, ry * 2);
   ctx.fillStyle = '#ffffff';
   ctx.globalAlpha = editingBoundary ? 0.08 : 0.035;
   ctx.fill();
@@ -590,7 +590,7 @@ function endZoneEdit(event) {
 function setEditingLayout(editing) {
   editingBoundary = false;
   boundaryEditButton.setAttribute('aria-pressed', 'false');
-  boundaryEditButton.textContent = 'Edit hit oval';
+  boundaryEditButton.textContent = 'Edit hit rectangle';
   editingLayout = editing;
   view.classList.toggle('editing', editingLayout || editingBoundary);
   layoutEdit.setAttribute('aria-pressed', String(editing));
@@ -609,9 +609,9 @@ function setEditingBoundary(editing) {
   editingBoundary = editing;
   view.classList.toggle('editing', editingLayout || editingBoundary);
   boundaryEditButton.setAttribute('aria-pressed', String(editing));
-  boundaryEditButton.textContent = editing ? 'Done editing oval' : 'Edit hit oval';
+  boundaryEditButton.textContent = editing ? 'Done editing rectangle' : 'Edit hit rectangle';
   layoutHelp.textContent = editing
-    ? 'Drag inside the oval to move the hit area. Drag any bounding-box handle to resize it.'
+    ? 'Drag inside the rectangle to move the hit area. Drag any bounding-box handle to resize it.'
     : layoutDirty ? 'Unsaved kit or hit-area changes. Save kit to keep them.' : 'Kit layout loaded.';
   requestRender();
 }

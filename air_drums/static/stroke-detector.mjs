@@ -2,11 +2,11 @@
 // camera timestamps in milliseconds; it has no DOM or audio dependencies.
 export function isWithinBoundary(point, boundary, width, height) {
   if (!point || !boundary || !(width > 0) || !(height > 0)) return false;
-  const radiusX = boundary.width * Math.min(width, height) / 2;
-  const radiusY = boundary.height * Math.min(width, height) / 2;
+  const halfWidth = boundary.width * Math.min(width, height) / 2;
+  const halfHeight = boundary.height * Math.min(width, height) / 2;
   const dx = (point.x - boundary.x) * width;
   const dy = (point.y - boundary.y) * height;
-  return (dx / radiusX) ** 2 + (dy / radiusY) ** 2 <= 1;
+  return Math.abs(dx) <= halfWidth && Math.abs(dy) <= halfHeight;
 }
 
 export class StrokeDetector {
