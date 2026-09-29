@@ -490,12 +490,6 @@ function zoneAt(point) {
   }).filter(({ distance }) => distance <= 1).sort((a, b) => a.distance - b.distance)[0]?.zone || null;
 }
 
-function moveZone(zoneId, point) {
-  const zone = kitLayout?.zones.find(item => item.id === zoneId);
-  if (!zone) return;
-  moveRegion(zone, point);
-}
-
 function moveRegion(region, point) {
   const shortSide = Math.min(canvas.width, canvas.height);
   const marginX = (region.width * shortSide / 2) / canvas.width;
@@ -521,6 +515,16 @@ function resizeRegion(region, drag, point, limits) {
   setLayoutDirty(true);
 }
 
+function resizeHandleAt(point, region) {
+  const handleRadius = Math.max(10 / canvas.width, 0.012);
+  return Object.entries(resizeHandlePoints(region)).find(([, [x, y]]) => {
+    const pointX = 1 - point.x;
+    const handleX = 1 - x / canvas.width;
+    return Math.hypot((pointX - handleX) * canvas.width, (point.y - y / canvas.height) * canvas.height)
+      <= Math.max(12, canvas.width * handleRadius);
+  })?.[0];
+}
+
 function beginZoneEdit(event) {
   if (editingBoundary) {
     beginBoundaryEdit(event);
@@ -529,17 +533,9 @@ function beginZoneEdit(event) {
   if (!editingLayout) return;
   const point = pointFromPointer(event);
   const zone = kitLayout?.zones.find(item => item.id === selectedZoneId);
-  const handles = zone ? resizeHandlePoints(zone) : {};
-  const handleRadius = Math.max(10 / canvas.width, 0.012);
-  const handle = Object.entries(handles).find(([, [x, y]]) => {
-    const pointX = 1 - point.x;
-    const handleX = 1 - x / canvas.width;
-    const pointY = point.y;
-    const handleY = y / canvas.height;
-    return Math.hypot((pointX - handleX) * canvas.width, (pointY - handleY) * canvas.height) <= Math.max(12, canvas.width * handleRadius);
-  })?.[0];
+  const handle = zone ? resizeHandleAt(point, zone) : null;
   if (zone && handle) {
-    dragging = { mode: 'resize', zoneId: zone.id, handle, point, x: zone.x, y: zone.y, width: zone.width, height: zone.height };
+    dragging = { mode: 'resize', region: zone, handle, point, x: zone.x, y: zone.y, width: zone.width, height: zone.height };
     canvas.setPointerCapture(event.pointerId);
     requestRender();
     return;
@@ -555,7 +551,7 @@ function beginZoneEdit(event) {
   const target = selectedHit ? zone : hit;
   if (!target) return;
   selectedZoneId = target.id;
-  dragging = { mode: 'move', zoneId: target.id };
+  dragging = { mode: 'move', region: target };
   canvas.setPointerCapture(event.pointerId);
   updateZoneControls();
   requestRender();
@@ -565,13 +561,7 @@ function beginBoundaryEdit(event) {
   const boundary = kitLayout?.strikeBoundary;
   if (!boundary) return;
   const point = pointFromPointer(event);
-  const handleRadius = Math.max(10 / canvas.width, 0.012);
-  const handle = Object.entries(resizeHandlePoints(boundary)).find(([, [x, y]]) => {
-    const pointX = 1 - point.x;
-    const handleX = 1 - x / canvas.width;
-    return Math.hypot((pointX - handleX) * canvas.width, (point.y - y / canvas.height) * canvas.height)
-      <= Math.max(12, canvas.width * handleRadius);
-  })?.[0];
+  const handle = resizeHandleAt(point, boundary);
   if (handle) dragging = { mode: 'resize', region: boundary, handle, point, ...boundary };
   else if (isWithinBoundary(point, boundary, canvas.width, canvas.height)) dragging = { mode: 'move', region: boundary };
   else return;
@@ -580,21 +570,16 @@ function beginBoundaryEdit(event) {
 }
 
 function continueZoneEdit(event) {
-  if (editingBoundary && dragging) {
-    const point = pointFromPointer(event);
-    if (dragging.mode === 'move') moveRegion(kitLayout.strikeBoundary, point);
-    else resizeRegion(kitLayout.strikeBoundary, dragging, point, { minWidth: 0.08, maxWidth: 0.90, minHeight: 0.08, maxHeight: 0.70 });
-    return;
-  }
-  if (!editingLayout || !dragging) return;
+  if ((!editingLayout && !editingBoundary) || !dragging) return;
   const point = pointFromPointer(event);
   if (dragging.mode === 'move') {
-    moveZone(dragging.zoneId, point);
+    moveRegion(dragging.region, point);
     return;
   }
-  const zone = kitLayout.zones.find(item => item.id === dragging.zoneId);
-  if (!zone) return;
-  resizeRegion(zone, dragging, point, { minWidth: 0.06, maxWidth: 0.70, minHeight: 0.06, maxHeight: 0.50 });
+  const limits = dragging.region === kitLayout.strikeBoundary
+    ? { minWidth: 0.08, maxWidth: 0.90, minHeight: 0.08, maxHeight: 0.70 }
+    : { minWidth: 0.06, maxWidth: 0.70, minHeight: 0.06, maxHeight: 0.50 };
+  resizeRegion(dragging.region, dragging, point, limits);
 }
 
 function endZoneEdit(event) {
