@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101313">
-    <title>Air Drummer · Strike Detection</title>
+    <title>Air Drummer · Target Prediction</title>
     <style>
       :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101313; color: #eff4ef; }
       * { box-sizing: border-box; }
@@ -29,6 +29,7 @@
       #status[data-state="busy"]::before { background: #f4c96b; }
       #status[data-state="error"]::before { background: #ff7979; }
       #strokeReadout { color: #f1d778; font: 600 .82rem/1.4 ui-monospace, monospace; }
+      #predictionReadout { color: #b9f0e7; font: 600 .78rem/1.5 ui-monospace, monospace; max-width: 920px; }
       .controls { display: flex; flex-wrap: wrap; align-items: end; gap: .8rem 1.1rem; padding: .9rem 1rem; background: #171c19; border-top: 1px solid #2d3831; }
       .control { display: grid; gap: .3rem; color: #aebdb2; font-size: .78rem; }
       select { min-width: 195px; border: 1px solid #3a463e; border-radius: 8px; padding: .55rem .7rem; background: #101613; color: #eff4ef; font: inherit; }
@@ -55,7 +56,7 @@
   <body>
     <main>
       <header>
-        <div><p class="eyebrow">Milestone 3 · Strike detection</p><h1>Air Drummer</h1></div>
+        <div><p class="eyebrow">Milestone 4 · Target prediction</p><h1>Air Drummer</h1></div>
         <div class="metrics" id="metrics">Camera: — · Processed: — · Inference: — · Frame delay: —</div>
       </header>
       <section class="stage" aria-label="Webcam tracking preview">
@@ -68,6 +69,7 @@
           <div>
             <div id="status" data-state="idle" role="status" aria-live="polite">Camera is off</div>
             <div id="strokeReadout" aria-live="off">Strokes: L idle · R idle · Hits 0 · Outside 0</div>
+            <div id="predictionReadout" aria-live="off">Prediction · move into a downswing to see estimates</div>
           </div>
           <button id="toggle" type="button">Start camera</button>
         </div>
@@ -102,8 +104,10 @@
         <span><i class="swatch" style="background:#61aaff"></i>Pose shoulder</span>
         <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
+        <span><i class="swatch" style="background:#55e8e0"></i>120 ms estimate</span>
+        <span><i class="swatch" style="background:#ff80d5"></i>Impact-turn estimate</span>
       </div>
-      <p class="hint">Move your wrists down and let them rebound. A hit counts only when its impact point lands inside the outlined rectangle. Select <strong>Edit hit rectangle</strong> to move it or drag any bounding-box handle to resize it. Stroke summaries are kept in local, session-grouped SQLite storage; raw camera frames and per-frame landmarks are not recorded.</p>
+      <p class="hint">Move your wrists down and let them rebound. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the outlined rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. Select <strong>Edit hit rectangle</strong> to adjust the accepted-hit area. Camera frames and per-frame landmarks are not recorded.</p>
       <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
       <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>

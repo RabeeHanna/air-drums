@@ -16,6 +16,39 @@ class StrokeValidationError(ValueError):
     pass
 
 
+PREDICTION_MODELS = ("fixed", "deceleration")
+ZONE_IDS = {"snare", "hi_hat", "tom_1", "tom_2", "floor_tom", "crash", "ride"}
+
+
+def _validate_predictions(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StrokeValidationError("stroke predictions must be an object or null")
+    predictions: dict[str, Any] = {}
+    for model in PREDICTION_MODELS:
+        item = value.get(model)
+        if item is None:
+            predictions[model] = None
+            continue
+        if not isinstance(item, dict):
+            raise StrokeValidationError(f"{model} prediction must be an object or null")
+        clean: dict[str, Any] = {}
+        for field in ("x", "y", "timeToImpactMs", "predictedImpactTimestampMs", "positionErrorPx", "timingErrorMs"):
+            number = item.get(field)
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+                raise StrokeValidationError(f"{model} prediction {field} must be a finite number")
+            if field in ("timeToImpactMs", "positionErrorPx") and number < 0:
+                raise StrokeValidationError(f"{model} prediction {field} cannot be negative")
+            clean[field] = number
+        zone_id = item.get("zoneId")
+        if zone_id is not None and zone_id not in ZONE_IDS:
+            raise StrokeValidationError(f"{model} prediction zoneId is not a known kit zone")
+        clean["zoneId"] = zone_id
+        predictions[model] = clean
+    return predictions
+
+
 def validate_stroke(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StrokeValidationError("stroke must be a JSON object")
@@ -45,7 +78,17 @@ def validate_stroke(value: Any) -> dict[str, Any]:
         for field, number in (("x", x), ("y", y)):
             if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or not 0 <= number <= 1:
                 raise StrokeValidationError(f"stroke {field} must be normalized between 0 and 1")
-    return {"hand": hand, "timestamp": timestamp, **numeric, "x": x, "y": y}
+    inside_hit_area = value.get("insideHitArea", True)
+    if not isinstance(inside_hit_area, bool):
+        raise StrokeValidationError("stroke insideHitArea must be a boolean")
+    actual_zone_id = value.get("actualZoneId")
+    if actual_zone_id is not None and actual_zone_id not in ZONE_IDS:
+        raise StrokeValidationError("stroke actualZoneId is not a known kit zone")
+    return {
+        "hand": hand, "timestamp": timestamp, **numeric, "x": x, "y": y,
+        "insideHitArea": inside_hit_area, "actualZoneId": actual_zone_id,
+        "predictions": _validate_predictions(value.get("predictions")),
+    }
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -70,7 +113,10 @@ def _connect(path: Path) -> sqlite3.Connection:
             hand TEXT NOT NULL CHECK (hand IN ('left', 'right')),
             duration_ms REAL NOT NULL,
             peak_speed REAL NOT NULL,
-            travel REAL NOT NULL
+            travel REAL NOT NULL,
+            inside_hit_area INTEGER NOT NULL DEFAULT 1,
+            actual_zone_id TEXT,
+            predictions_json TEXT
         );
         CREATE INDEX IF NOT EXISTS strokes_by_session_time
             ON strokes(session_id, camera_timestamp_ms);
@@ -85,6 +131,12 @@ def _connect(path: Path) -> sqlite3.Connection:
         connection.execute("ALTER TABLE strokes ADD COLUMN impact_x REAL")
     if "impact_y" not in stroke_columns:
         connection.execute("ALTER TABLE strokes ADD COLUMN impact_y REAL")
+    if "inside_hit_area" not in stroke_columns:
+        connection.execute("ALTER TABLE strokes ADD COLUMN inside_hit_area INTEGER NOT NULL DEFAULT 1")
+    if "actual_zone_id" not in stroke_columns:
+        connection.execute("ALTER TABLE strokes ADD COLUMN actual_zone_id TEXT")
+    if "predictions_json" not in stroke_columns:
+        connection.execute("ALTER TABLE strokes ADD COLUMN predictions_json TEXT")
     return connection
 
 
@@ -115,9 +167,13 @@ def migrate_legacy_jsonl(database_path: Path, legacy_path: Path) -> int:
             )
             connection.executemany(
                 """INSERT INTO strokes(session_id, timestamp, camera_timestamp_ms, hand,
-                   duration_ms, peak_speed, travel, impact_x, impact_y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   duration_ms, peak_speed, travel, impact_x, impact_y, inside_hit_area, actual_zone_id, predictions_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(session_id, item["timestamp"], item["cameraTimestampMs"], item["hand"],
-                  item["durationMs"], item["peakSpeed"], item["travel"], item["x"], item["y"]) for item in records],
+                  item["durationMs"], item["peakSpeed"], item["travel"], item["x"], item["y"],
+                  int(item["insideHitArea"]), item["actualZoneId"],
+                  json.dumps(item["predictions"], separators=(",", ":")) if item["predictions"] is not None else None)
+                 for item in records],
             )
             imported = len(records)
         connection.execute(
@@ -174,9 +230,12 @@ def write_stroke_batch(database_path: Path, records: list[dict[str, Any]]) -> No
                     stroke = record["stroke"]
                     connection.execute(
                         """INSERT INTO strokes(session_id, timestamp, camera_timestamp_ms, hand,
-                           duration_ms, peak_speed, travel, impact_x, impact_y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           duration_ms, peak_speed, travel, impact_x, impact_y, inside_hit_area, actual_zone_id, predictions_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (session_id, stroke["timestamp"], stroke["cameraTimestampMs"], stroke["hand"],
-                         stroke["durationMs"], stroke["peakSpeed"], stroke["travel"], stroke["x"], stroke["y"]),
+                         stroke["durationMs"], stroke["peakSpeed"], stroke["travel"], stroke["x"], stroke["y"],
+                         int(stroke["insideHitArea"]), stroke["actualZoneId"],
+                         json.dumps(stroke["predictions"], separators=(",", ":")) if stroke["predictions"] is not None else None),
                     )
                 elif record["kind"] == "finish":
                     connection.execute(
@@ -196,13 +255,20 @@ def get_session(database_path: Path, session_id: str) -> dict[str, Any] | None:
         strokes = connection.execute(
             """SELECT timestamp, camera_timestamp_ms AS cameraTimestampMs, hand,
                duration_ms AS durationMs, peak_speed AS peakSpeed, travel,
-               impact_x AS x, impact_y AS y
+               impact_x AS x, impact_y AS y, inside_hit_area AS insideHitArea,
+               actual_zone_id AS actualZoneId, predictions_json AS predictionsJson
                FROM strokes WHERE session_id = ? ORDER BY camera_timestamp_ms, id""",
             (session_id,),
         ).fetchall()
+        saved_strokes = []
+        for stroke in strokes:
+            item = dict(stroke)
+            item["insideHitArea"] = bool(item["insideHitArea"])
+            item["predictions"] = json.loads(item.pop("predictionsJson")) if item["predictionsJson"] else None
+            saved_strokes.append(item)
         return {
             "id": row["id"], "startedAt": row["started_at"], "endedAt": row["ended_at"],
-            "strokes": [dict(stroke) for stroke in strokes],
+            "strokes": saved_strokes,
         }
     finally:
         connection.close()
@@ -212,7 +278,8 @@ def list_sessions(database_path: Path, limit: int = 25) -> list[dict[str, Any]]:
     connection = _connect(database_path)
     try:
         rows = connection.execute(
-            """SELECT s.id, s.started_at, s.ended_at, COUNT(h.id) AS hit_count
+            """SELECT s.id, s.started_at, s.ended_at,
+               COUNT(h.id) FILTER (WHERE h.inside_hit_area = 1) AS hit_count
                FROM sessions s LEFT JOIN strokes h ON h.session_id = s.id
                GROUP BY s.id ORDER BY s.started_at DESC LIMIT ?""",
             (limit,),

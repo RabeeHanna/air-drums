@@ -1,10 +1,12 @@
 import { isWithinBoundary, StrokeDetector } from './stroke-detector.mjs';
+import { comparePredictions, TargetPredictor } from './target-predictor.mjs';
 
 const video = document.querySelector('#video');
 const canvas = document.querySelector('#overlay');
 const ctx = canvas.getContext('2d');
 const status = document.querySelector('#status');
 const strokeReadout = document.querySelector('#strokeReadout');
+const predictionReadout = document.querySelector('#predictionReadout');
 const metrics = document.querySelector('#metrics');
 const toggle = document.querySelector('#toggle');
 const empty = document.querySelector('#empty');
@@ -52,9 +54,14 @@ const strokeDetectors = new Map([
   ['left', new StrokeDetector('left')],
   ['right', new StrokeDetector('right')],
 ]);
+const targetPredictors = new Map([
+  ['left', new TargetPredictor()],
+  ['right', new TargetPredictor()],
+]);
 const visibleHits = new Map();
 let totalHits = 0;
 let ignoredHits = 0;
+let lastPredictionComparison = '';
 let strokeSessionId = null;
 let strokeWriteQueue = Promise.resolve();
 
@@ -267,21 +274,67 @@ function detectStrokes(pose, timestampMs) {
   const aspectRatio = canvas.width / canvas.height;
   for (const hand of ['left', 'right']) {
     const point = pose?.[`${hand}Wrist`];
-    const result = strokeDetectors.get(hand).update(point, timestampMs, shoulderScale, aspectRatio);
+    const detector = strokeDetectors.get(hand);
+    const predictor = targetPredictors.get(hand);
+    const priorPrediction = predictor.predictions;
+    const result = detector.update(point, timestampMs, shoulderScale, aspectRatio);
+    const prediction = result.event ? priorPrediction : predictor.update(point, timestampMs, shoulderScale, aspectRatio, {
+      active: result.state === 'downswing',
+      peakDownSpeed: detector.peakDownSpeed,
+      impactDrop: detector.impactDrop,
+    });
     if (result.event) {
       result.event.x = point.x;
       result.event.y = point.y;
-      if (isInsideStrikeBoundary(point)) {
+      result.event.insideHitArea = isInsideStrikeBoundary(point);
+      result.event.actualZoneId = nearestZone(point)?.id ?? null;
+      result.event.predictions = comparePredictions(
+        prediction || predictor.predictions,
+        result.event,
+        canvas.width,
+        canvas.height,
+        kitLayout?.zones ?? [],
+      );
+      const modelSummaries = [['fixed', '120ms'], ['deceleration', 'turn']].map(([model, label]) => {
+        const item = result.event.predictions?.[model];
+        if (!item) return `${label} unavailable`;
+        const predictedZone = kitLayout?.zones.find(zone => zone.id === item.zoneId)?.label ?? '—';
+        const actualZone = kitLayout?.zones.find(zone => zone.id === result.event.actualZoneId)?.label ?? '—';
+        return `${label} ${predictedZone} → ${actualZone}: ${item.positionErrorPx.toFixed(0)}px, ${item.timingErrorMs >= 0 ? '+' : ''}${item.timingErrorMs.toFixed(0)}ms`;
+      });
+      lastPredictionComparison = `${hand === 'left' ? 'L' : 'R'} impact · ${modelSummaries.join(' · ')}`;
+      if (result.event.insideHitArea) {
         totalHits += 1;
         visibleHits.set(hand, { point: { x: point.x, y: point.y }, until: performance.now() + 280 });
         requestRender();
-        logStroke(result.event);
       } else {
         ignoredHits += 1;
       }
+      logStroke(result.event);
+      predictor.reset();
+    } else if (!prediction && result.state !== 'downswing') {
+      predictor.predictions = null;
     }
   }
+  updatePredictionReadout();
   strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Hits ${totalHits} · Outside ${ignoredHits}`;
+}
+
+function updatePredictionReadout() {
+  const active = [];
+  for (const [hand, predictor] of targetPredictors) {
+    if (!predictor.predictions) continue;
+    const summaries = [['120ms', predictor.predictions.fixed], ['turn', predictor.predictions.deceleration]]
+      .map(([name, prediction]) => {
+        const zone = prediction ? nearestZone(prediction)?.label ?? '—' : 'unavailable';
+        const eta = prediction ? `${prediction.timeToImpactMs.toFixed(0)}ms` : '—';
+        return `${name}: ${zone} @ ${eta}`;
+      });
+    active.push(`${hand === 'left' ? 'L' : 'R'} ${summaries.join(' · ')}`);
+  }
+  predictionReadout.textContent = active.length
+    ? `Prediction · ${active.join(' | ')}`
+    : lastPredictionComparison || 'Prediction · move into a downswing to see estimates';
 }
 
 function isInsideStrikeBoundary(point) {
@@ -314,6 +367,9 @@ function drawKitLayout(width, height) {
     const rx = zone.width * shortSide / 2;
     const ry = zone.height * shortSide / 2;
     const selected = zone.id === selectedZoneId;
+    const highlighted = [...targetPredictors.values()].some(predictor =>
+      predictor.predictions && [predictor.predictions.fixed, predictor.predictions.deceleration]
+        .some(prediction => prediction && nearestZone(prediction)?.id === zone.id));
     ctx.beginPath();
     ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
     ctx.globalAlpha = editingLayout ? 0.20 : 0.12;
@@ -321,8 +377,8 @@ function drawKitLayout(width, height) {
     ctx.fill();
     ctx.globalAlpha = 1;
     ctx.setLineDash(editingLayout && selected ? [8, 5] : []);
-    ctx.lineWidth = selected && editingLayout ? 4 : 2;
-    ctx.strokeStyle = zone.color;
+    ctx.lineWidth = highlighted ? 5 : selected && editingLayout ? 4 : 2;
+    ctx.strokeStyle = highlighted ? '#fff' : zone.color;
     ctx.stroke();
     ctx.setLineDash([]);
     if (editingLayout && selected) drawResizeBox(zone, width, height);
@@ -375,6 +431,63 @@ function drawStrikeBoundary(width, height) {
   ctx.restore();
 }
 
+function nearestZone(point) {
+  if (!kitLayout || !point) return null;
+  const width = canvas.width;
+  const height = canvas.height;
+  const shortSide = Math.min(width, height);
+  return kitLayout.zones.map(zone => {
+    const dx = (point.x - zone.x) * width / (zone.width * shortSide / 2);
+    const dy = (point.y - zone.y) * height / (zone.height * shortSide / 2);
+    return { zone, distance: dx * dx + dy * dy };
+  }).sort((a, b) => a.distance - b.distance)[0]?.zone || null;
+}
+
+function drawTargetPredictions(width, height) {
+  for (const [hand, predictor] of targetPredictors) {
+    if (!predictor.predictions) continue;
+    for (const [prediction, color, label] of [
+      [predictor.predictions.fixed, '#55e8e0', '120'],
+      [predictor.predictions.deceleration, '#ff80d5', 'TURN'],
+    ]) {
+      if (!prediction) continue;
+      const x = prediction.x * width;
+      const y = prediction.y * height;
+      const wrist = currentResult?.pose?.[`${hand}Wrist`];
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo((wrist?.x ?? prediction.x) * width, (wrist?.y ?? prediction.y) * height);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(2, width * 0.003);
+      ctx.setLineDash([7, 5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(10, width * 0.014), 0, Math.PI * 2);
+      ctx.fillStyle = `${color}55`;
+      ctx.fill();
+      ctx.lineWidth = Math.max(3, width * 0.0035);
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      const zone = nearestZone(prediction);
+      ctx.font = `800 ${Math.max(11, width * 0.014)}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = Math.max(3, width * 0.004);
+      ctx.strokeStyle = '#101313';
+      ctx.save();
+      ctx.translate(x, y - Math.max(14, width * 0.018));
+      ctx.scale(-1, 1);
+      const text = `${hand === 'left' ? 'L' : 'R'} ${label} ${prediction.timeToImpactMs.toFixed(0)}ms · ${zone?.label ?? '—'}`;
+      ctx.strokeText(text, 0, 0);
+      ctx.fillStyle = color;
+      ctx.fillText(text, 0, 0);
+      ctx.restore();
+      ctx.restore();
+    }
+  }
+}
+
 function zoneBounds(zone, width = canvas.width, height = canvas.height) {
   const rx = zone.width * Math.min(width, height) / 2;
   const ry = zone.height * Math.min(width, height) / 2;
@@ -411,6 +524,7 @@ function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawKitLayout(canvas.width, canvas.height);
   drawStrikeBoundary(canvas.width, canvas.height);
+  drawTargetPredictions(canvas.width, canvas.height);
   if (currentResult) {
     drawPose(currentResult.pose, currentResult.filteredPose, canvas.width, canvas.height);
     drawHitFeedback(canvas.width, canvas.height);
@@ -695,10 +809,13 @@ function initializeWorker() {
   currentInference = null;
   filters.clear();
   for (const detector of strokeDetectors.values()) detector.reset();
+  for (const predictor of targetPredictors.values()) predictor.reset();
   visibleHits.clear();
   totalHits = 0;
   ignoredHits = 0;
+  lastPredictionComparison = '';
   strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
+  updatePredictionReadout();
   worker.postMessage({
     type: 'initialize',
     generation,
@@ -789,9 +906,12 @@ function stop() {
   currentInference = null;
   filters.clear();
   for (const detector of strokeDetectors.values()) detector.reset();
+  for (const predictor of targetPredictors.values()) predictor.reset();
+  lastPredictionComparison = '';
   visibleHits.clear();
   totalHits = 0;
   strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
+  updatePredictionReadout();
   processedFps = 0;
   displayDelayMs = 0;
   cameraDescription = '—';

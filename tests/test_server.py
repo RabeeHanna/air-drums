@@ -85,6 +85,32 @@ class KitLayoutAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(saved["endedAt"])
         self.assertTrue(self.stroke_database.exists())
 
+    async def test_prediction_comparisons_and_outside_strokes_are_persisted(self):
+        stroke = {
+            "hand": "right", "timestamp": "2026-09-29T12:01:00.000Z",
+            "cameraTimestampMs": 1300, "durationMs": 85, "peakSpeed": 5.1, "travel": 0.16,
+            "x": 0.91, "y": 0.72, "insideHitArea": False, "actualZoneId": "ride",
+            "predictions": {
+                "fixed": {
+                    "x": 0.86, "y": 0.68, "timeToImpactMs": 120,
+                    "predictedImpactTimestampMs": 1420, "zoneId": "ride",
+                    "positionErrorPx": 36.0, "timingErrorMs": 45.0,
+                },
+                "deceleration": None,
+            },
+        }
+        session_id = (await (await self.client.post("/api/sessions")).json())["id"]
+        response = await self.client.post(f"/api/sessions/{session_id}/strokes", json=stroke)
+        self.assertEqual(response.status, 202)
+        await self.client.post(f"/api/sessions/{session_id}/finish")
+        saved = await (await self.client.get(f"/api/sessions/{session_id}")).json()
+        self.assertEqual(saved["strokes"][0]["insideHitArea"], False)
+        self.assertEqual(saved["strokes"][0]["actualZoneId"], "ride")
+        self.assertEqual(saved["strokes"][0]["predictions"]["fixed"]["timingErrorMs"], 45.0)
+        self.assertIsNone(saved["strokes"][0]["predictions"]["deceleration"])
+        sessions = await (await self.client.get("/api/sessions")).json()
+        self.assertEqual(sessions["sessions"][0]["hitCount"], 0)
+
     async def test_legacy_flat_log_is_imported_once_into_database(self):
         legacy_path = Path(self.temporary_directory.name) / "legacy.jsonl"
         legacy_path.write_text(

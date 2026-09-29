@@ -12,5 +12,5 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace:ro
-    command: ["node", "--test", "tests-js/stroke-detector.test.mjs"]
+    command: ["node", "--test", "tests-js/stroke-detector.test.mjs", "tests-js/target-predictor.test.mjs"]
     profiles: ["test"]
