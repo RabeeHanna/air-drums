@@ -7,3 +7,10 @@ services:
       - ./data:/app/data
     init: true
     restart: unless-stopped
+  stroke-tests:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+    command: ["node", "--test", "tests-js/stroke-detector.test.mjs"]
+    profiles: ["test"]

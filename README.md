@@ -14,20 +14,25 @@ The app tries the MediaPipe GPU delegate and falls back to CPU if it cannot use 
 
 The preview includes translucent oval regions for snare, hi-hat, Tom 1, Tom 2, floor tom, crash, and ride. Select **Edit layout**, drag an oval to move it, or drag one of its eight bounding-box handles to resize it. Regions may overlap; choose the active one from **Selected zone**. **Save kit** writes normalized centers and oval width/height to `data/kit-layout.json` on the host. The Docker bind mount keeps this file across container rebuilds. Existing circle settings migrate to flatter ovals while preserving their centers and horizontal reach. **Reset zones** restores the built-in layout; save to make that reset persistent.
 
+The current milestone detects strokes independently from the raw left and right wrist landmarks. It includes the first fast segment in its travel estimate and uses a lower body-scale-normalized speed and travel threshold to catch quick strokes. An impact counts only inside the single movable **HIT AREA** circle; edit its position or size, then save the kit. A brief **HIT** marker appears at accepted impact points.
+
+Stroke records are grouped into camera sessions in `data/air-drums.sqlite3`. A bounded in-memory queue feeds one background writer that batches nearby events into SQLite transactions; the camera and UI do not wait for disk writes. The database keeps timestamps, hand, impact point, duration, peak speed, and travel, but no video or per-frame landmark stream. These compact records help tune detection now and compare predictions with intended targets in guided classifier tests later. Older `strokes.jsonl` events are imported into one legacy session the next time the app starts.
+
 Press `Ctrl+C` in the terminal to stop the app. To remove the stopped container:
 
 ```powershell
 docker compose down
 ```
 
-## Milestone 2 review
+## Milestone 3 review
 
-Review whether each shaded region aligns with your mirrored playing position and whether your wrists can reach them naturally. Move and resize ovals until the arrangement feels comfortable, overlap zones where needed, and save the kit. Zone coordinates use the source-camera coordinate space internally and are mirrored in the preview.
+With the camera running, try quick and ordinary downward strokes, crossed hands, alternating hands, and pauses between hits. Adjust the outlined **HIT AREA** circle so it contains the playing positions you want to count. Review marker timing, missed strokes, false hits, and duplicate hits. A live playing review is needed to tune these thresholds; synthetic tests verify the state transitions but cannot model your technique.
 
 ## Tests
 
 ```powershell
 docker compose exec -T air-drums python -m unittest discover -s tests
+docker compose run --rm stroke-tests
 ```
 
-The tests cover the seven default zones, JSON persistence, and invalid layout rejection. Webcam reach and perspective still require a live review.
+The Python tests cover kit layout persistence and API validation, including stroke JSONL logging. The Node tests cover downswing/impact/rebound transitions, jitter rejection, minimum travel, and lost tracking reset. Webcam strike quality still requires a live review.

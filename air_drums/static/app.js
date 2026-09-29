@@ -1,7 +1,10 @@
+import { isWithinBoundary, StrokeDetector } from './stroke-detector.mjs';
+
 const video = document.querySelector('#video');
 const canvas = document.querySelector('#overlay');
 const ctx = canvas.getContext('2d');
 const status = document.querySelector('#status');
+const strokeReadout = document.querySelector('#strokeReadout');
 const metrics = document.querySelector('#metrics');
 const toggle = document.querySelector('#toggle');
 const empty = document.querySelector('#empty');
@@ -16,6 +19,7 @@ const layoutSave = document.querySelector('#layoutSave');
 const layoutReset = document.querySelector('#layoutReset');
 const layoutHelp = document.querySelector('#layoutHelp');
 const zoneSelect = document.querySelector('#zoneSelect');
+const boundaryEditButton = document.querySelector('#boundaryEdit');
 
 const POSE_CONNECTIONS = [[11, 13], [13, 15], [12, 14], [14, 16], [11, 12]];
 const POSE_COLORS = { shoulder: '#61aaff', elbow: '#43e0b5', wrist: '#f5cb5c' };
@@ -42,7 +46,17 @@ let selectedZoneId = null;
 let dragging = null;
 let editingLayout = false;
 let layoutDirty = false;
+let editingBoundary = false;
 const filters = new Map();
+const strokeDetectors = new Map([
+  ['left', new StrokeDetector('left')],
+  ['right', new StrokeDetector('right')],
+]);
+const visibleHits = new Map();
+let totalHits = 0;
+let ignoredHits = 0;
+let strokeSessionId = null;
+let strokeWriteQueue = Promise.resolve();
 
 function setStatus(text, state = 'idle') {
   status.textContent = text;
@@ -201,6 +215,96 @@ function drawPose(rawPose, filteredPose, width, height) {
   }
 }
 
+function drawHitFeedback(width, height) {
+  const now = performance.now();
+  for (const [hand, hit] of visibleHits) {
+    if (now > hit.until) {
+      visibleHits.delete(hand);
+      continue;
+    }
+    const x = hit.point.x * width;
+    const y = hit.point.y * height;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(22, width * 0.028), 0, Math.PI * 2);
+    ctx.fillStyle = '#f5cb5c';
+    ctx.globalAlpha = 0.28;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = Math.max(3, width * 0.004);
+    ctx.strokeStyle = '#fff2b8';
+    ctx.stroke();
+    ctx.font = `900 ${Math.max(17, width * 0.024)}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.lineWidth = Math.max(4, width * 0.005);
+    ctx.strokeStyle = '#101313';
+    ctx.translate(x, y - Math.max(28, width * 0.034));
+    ctx.scale(-1, 1);
+    ctx.strokeText('HIT', 0, 0);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('HIT', 0, 0);
+    ctx.restore();
+  }
+}
+
+function logStroke(stroke) {
+  if (!strokeSessionId) return;
+  // Serialize compact stroke events; frame processing never waits here.
+  const sessionId = strokeSessionId;
+  strokeWriteQueue = strokeWriteQueue.then(() => fetch(`/api/sessions/${sessionId}/strokes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(stroke),
+  })).catch(() => {});
+}
+
+function detectStrokes(pose, timestampMs) {
+  const left = pose?.leftShoulder;
+  const right = pose?.rightShoulder;
+  const shoulderScale = left && right && Math.min(left.visibility ?? 1, right.visibility ?? 1) >= 0.35
+    ? Math.hypot((left.x - right.x) * (canvas.width / canvas.height), left.y - right.y)
+    : null;
+  const aspectRatio = canvas.width / canvas.height;
+  for (const hand of ['left', 'right']) {
+    const point = pose?.[`${hand}Wrist`];
+    const result = strokeDetectors.get(hand).update(point, timestampMs, shoulderScale, aspectRatio);
+    if (result.event) {
+      result.event.x = point.x;
+      result.event.y = point.y;
+      if (isInsideStrikeBoundary(point)) {
+        totalHits += 1;
+        visibleHits.set(hand, { point: { x: point.x, y: point.y }, until: performance.now() + 280 });
+        requestRender();
+        logStroke(result.event);
+      } else {
+        ignoredHits += 1;
+      }
+    }
+  }
+  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Hits ${totalHits} · Outside ${ignoredHits}`;
+}
+
+function isInsideStrikeBoundary(point) {
+  return isWithinBoundary(point, kitLayout?.strikeBoundary, canvas.width, canvas.height);
+}
+
+async function openStrokeSession() {
+  strokeWriteQueue = Promise.resolve();
+  const response = await fetch('/api/sessions', { method: 'POST' });
+  if (!response.ok) throw new Error(`Recording setup failed (${response.status})`);
+  strokeSessionId = (await response.json()).id;
+}
+
+function closeStrokeSession() {
+  const sessionId = strokeSessionId;
+  strokeSessionId = null;
+  if (sessionId) {
+    strokeWriteQueue = strokeWriteQueue
+      .then(() => fetch(`/api/sessions/${sessionId}/finish`, { method: 'POST' }))
+      .catch(() => {});
+  }
+}
+
 function drawKitLayout(width, height) {
   if (!kitLayout) return;
   const shortSide = Math.min(width, height);
@@ -234,6 +338,41 @@ function drawKitLayout(width, height) {
     ctx.fillText(zone.label, 0, 0);
     ctx.restore();
   }
+}
+
+function drawStrikeBoundary(width, height) {
+  if (!kitLayout?.strikeBoundary) return;
+  const boundary = kitLayout.strikeBoundary;
+  const { x, y } = boundary;
+  const cx = x * width;
+  const cy = y * height;
+  const rx = boundary.width * Math.min(width, height) / 2;
+  const ry = boundary.height * Math.min(width, height) / 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.globalAlpha = editingBoundary ? 0.08 : 0.035;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = editingBoundary ? 4 : 3;
+  ctx.setLineDash(editingBoundary ? [12, 7] : [8, 7]);
+  ctx.strokeStyle = editingBoundary ? '#ffffff' : '#fff2b8';
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = `700 ${Math.max(12, width * 0.016)}px system-ui`;
+  ctx.textAlign = 'center';
+  ctx.lineWidth = Math.max(3, width * 0.004);
+  ctx.strokeStyle = '#101313';
+  ctx.save();
+  ctx.translate(cx, cy - ry - Math.max(10, width * 0.012));
+  ctx.scale(-1, 1);
+  ctx.strokeText('HIT AREA', 0, 0);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('HIT AREA', 0, 0);
+  ctx.restore();
+  if (editingBoundary) drawResizeBox(boundary, width, height);
+  ctx.restore();
 }
 
 function zoneBounds(zone, width = canvas.width, height = canvas.height) {
@@ -271,8 +410,21 @@ function render() {
   setCanvasSize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawKitLayout(canvas.width, canvas.height);
-  if (currentResult) drawPose(currentResult.pose, currentResult.filteredPose, canvas.width, canvas.height);
-  requestAnimationFrame(render);
+  drawStrikeBoundary(canvas.width, canvas.height);
+  if (currentResult) {
+    drawPose(currentResult.pose, currentResult.filteredPose, canvas.width, canvas.height);
+    drawHitFeedback(canvas.width, canvas.height);
+  }
+}
+
+let renderFrameId = null;
+function requestRender() {
+  if (renderFrameId !== null) return;
+  renderFrameId = requestAnimationFrame(() => {
+    renderFrameId = null;
+    render();
+    if (visibleHits.size) requestRender();
+  });
 }
 
 function cloneLayout(layout) {
@@ -285,6 +437,7 @@ function setLayoutDirty(dirty) {
   layoutHelp.textContent = dirty
     ? 'Unsaved kit changes. Save kit to keep these positions.'
     : 'Kit layout loaded.';
+  requestRender();
 }
 
 function updateZoneControls() {
@@ -304,6 +457,7 @@ async function loadKitLayout() {
     selectedZoneId = kitLayout.zones[0]?.id || null;
     updateZoneControls();
     setLayoutDirty(false);
+    requestRender();
   } catch (error) {
     layoutHelp.textContent = `Kit layout unavailable: ${error.message}`;
     layoutSave.disabled = true;
@@ -339,15 +493,39 @@ function zoneAt(point) {
 function moveZone(zoneId, point) {
   const zone = kitLayout?.zones.find(item => item.id === zoneId);
   if (!zone) return;
+  moveRegion(zone, point);
+}
+
+function moveRegion(region, point) {
   const shortSide = Math.min(canvas.width, canvas.height);
-  const marginX = (zone.width * shortSide / 2) / canvas.width;
-  const marginY = (zone.height * shortSide / 2) / canvas.height;
-  zone.x = Math.max(marginX, Math.min(1 - marginX, point.x));
-  zone.y = Math.max(marginY, Math.min(1 - marginY, point.y));
+  const marginX = (region.width * shortSide / 2) / canvas.width;
+  const marginY = (region.height * shortSide / 2) / canvas.height;
+  region.x = Math.max(marginX, Math.min(1 - marginX, point.x));
+  region.y = Math.max(marginY, Math.min(1 - marginY, point.y));
+  setLayoutDirty(true);
+}
+
+function resizeRegion(region, drag, point, limits) {
+  const shortSide = Math.min(canvas.width, canvas.height);
+  const dx = (point.x - drag.point.x) * canvas.width;
+  const dy = (point.y - drag.point.y) * canvas.height;
+  let { x, y, width, height } = drag;
+  if (drag.handle.includes('e')) { width += 2 * dx / shortSide; x += dx / (2 * canvas.width); }
+  if (drag.handle.includes('w')) { width -= 2 * dx / shortSide; x += dx / (2 * canvas.width); }
+  if (drag.handle.includes('s')) { height += 2 * dy / shortSide; y += dy / (2 * canvas.height); }
+  if (drag.handle.includes('n')) { height -= 2 * dy / shortSide; y += dy / (2 * canvas.height); }
+  region.width = Math.max(limits.minWidth, Math.min(limits.maxWidth, width));
+  region.height = Math.max(limits.minHeight, Math.min(limits.maxHeight, height));
+  region.x = Math.max(region.width * shortSide / (2 * canvas.width), Math.min(1 - region.width * shortSide / (2 * canvas.width), x));
+  region.y = Math.max(region.height * shortSide / (2 * canvas.height), Math.min(1 - region.height * shortSide / (2 * canvas.height), y));
   setLayoutDirty(true);
 }
 
 function beginZoneEdit(event) {
+  if (editingBoundary) {
+    beginBoundaryEdit(event);
+    return;
+  }
   if (!editingLayout) return;
   const point = pointFromPointer(event);
   const zone = kitLayout?.zones.find(item => item.id === selectedZoneId);
@@ -363,6 +541,7 @@ function beginZoneEdit(event) {
   if (zone && handle) {
     dragging = { mode: 'resize', zoneId: zone.id, handle, point, x: zone.x, y: zone.y, width: zone.width, height: zone.height };
     canvas.setPointerCapture(event.pointerId);
+    requestRender();
     return;
   }
   const hit = zoneAt(point);
@@ -379,9 +558,34 @@ function beginZoneEdit(event) {
   dragging = { mode: 'move', zoneId: target.id };
   canvas.setPointerCapture(event.pointerId);
   updateZoneControls();
+  requestRender();
+}
+
+function beginBoundaryEdit(event) {
+  const boundary = kitLayout?.strikeBoundary;
+  if (!boundary) return;
+  const point = pointFromPointer(event);
+  const handleRadius = Math.max(10 / canvas.width, 0.012);
+  const handle = Object.entries(resizeHandlePoints(boundary)).find(([, [x, y]]) => {
+    const pointX = 1 - point.x;
+    const handleX = 1 - x / canvas.width;
+    return Math.hypot((pointX - handleX) * canvas.width, (point.y - y / canvas.height) * canvas.height)
+      <= Math.max(12, canvas.width * handleRadius);
+  })?.[0];
+  if (handle) dragging = { mode: 'resize', region: boundary, handle, point, ...boundary };
+  else if (isWithinBoundary(point, boundary, canvas.width, canvas.height)) dragging = { mode: 'move', region: boundary };
+  else return;
+  canvas.setPointerCapture(event.pointerId);
+  requestRender();
 }
 
 function continueZoneEdit(event) {
+  if (editingBoundary && dragging) {
+    const point = pointFromPointer(event);
+    if (dragging.mode === 'move') moveRegion(kitLayout.strikeBoundary, point);
+    else resizeRegion(kitLayout.strikeBoundary, dragging, point, { minWidth: 0.08, maxWidth: 0.90, minHeight: 0.08, maxHeight: 0.70 });
+    return;
+  }
   if (!editingLayout || !dragging) return;
   const point = pointFromPointer(event);
   if (dragging.mode === 'move') {
@@ -390,23 +594,7 @@ function continueZoneEdit(event) {
   }
   const zone = kitLayout.zones.find(item => item.id === dragging.zoneId);
   if (!zone) return;
-  const shortSide = Math.min(canvas.width, canvas.height);
-  const dx = (point.x - dragging.point.x) * canvas.width;
-  const dy = (point.y - dragging.point.y) * canvas.height;
-  const h = dragging.handle;
-  let width = dragging.width;
-  let height = dragging.height;
-  let x = dragging.x;
-  let y = dragging.y;
-  if (h.includes('e')) { width += 2 * dx / shortSide; x += dx / (2 * canvas.width); }
-  if (h.includes('w')) { width -= 2 * dx / shortSide; x += dx / (2 * canvas.width); }
-  if (h.includes('s')) { height += 2 * dy / shortSide; y += dy / (2 * canvas.height); }
-  if (h.includes('n')) { height -= 2 * dy / shortSide; y += dy / (2 * canvas.height); }
-  zone.width = Math.max(0.06, Math.min(0.70, width));
-  zone.height = Math.max(0.06, Math.min(0.50, height));
-  zone.x = Math.max(zone.width * shortSide / (2 * canvas.width), Math.min(1 - zone.width * shortSide / (2 * canvas.width), x));
-  zone.y = Math.max(zone.height * shortSide / (2 * canvas.height), Math.min(1 - zone.height * shortSide / (2 * canvas.height), y));
-  setLayoutDirty(true);
+  resizeRegion(zone, dragging, point, { minWidth: 0.06, maxWidth: 0.70, minHeight: 0.06, maxHeight: 0.50 });
 }
 
 function endZoneEdit(event) {
@@ -415,14 +603,32 @@ function endZoneEdit(event) {
 }
 
 function setEditingLayout(editing) {
+  editingBoundary = false;
+  boundaryEditButton.setAttribute('aria-pressed', 'false');
+  boundaryEditButton.textContent = 'Edit hit oval';
   editingLayout = editing;
-  view.classList.toggle('editing', editing);
+  view.classList.toggle('editing', editingLayout || editingBoundary);
   layoutEdit.setAttribute('aria-pressed', String(editing));
   layoutEdit.textContent = editing ? 'Done editing' : 'Edit layout';
   layoutHelp.textContent = editing
     ? 'Drag an oval to move it. Drag one of its eight bounding-box handles to resize it. Overlap is allowed.'
     : layoutDirty ? 'Unsaved kit changes. Save kit to keep these positions.' : 'Kit layout loaded.';
   updateZoneControls();
+  requestRender();
+}
+
+function setEditingBoundary(editing) {
+  editingLayout = false;
+  layoutEdit.setAttribute('aria-pressed', 'false');
+  layoutEdit.textContent = 'Edit layout';
+  editingBoundary = editing;
+  view.classList.toggle('editing', editingLayout || editingBoundary);
+  boundaryEditButton.setAttribute('aria-pressed', String(editing));
+  boundaryEditButton.textContent = editing ? 'Done editing oval' : 'Edit hit oval';
+  layoutHelp.textContent = editing
+    ? 'Drag inside the oval to move the hit area. Drag any bounding-box handle to resize it.'
+    : layoutDirty ? 'Unsaved kit or hit-area changes. Save kit to keep them.' : 'Kit layout loaded.';
+  requestRender();
 }
 
 async function saveKitLayout() {
@@ -478,6 +684,7 @@ function handleWorkerMessage(event) {
   if (message.type !== 'result') return;
 
   currentResult = { ...message, filteredPose: filterPose(message.pose, message.timestampMs) };
+  detectStrokes(message.pose, message.timestampMs);
   currentInference = message.inference;
   displayDelayMs = performance.now() - sentAt;
   resultCount += 1;
@@ -488,6 +695,7 @@ function handleWorkerMessage(event) {
     resultWindowStarted = performance.now();
   }
   updateMetrics();
+  requestRender();
 
   const wristsVisible = Boolean(message.pose?.leftWrist && message.pose?.rightWrist);
   setStatus(wristsVisible ? 'Tracking both wrists' : 'Finding shoulders, elbows, and wrists', wristsVisible ? 'ready' : 'busy');
@@ -501,6 +709,11 @@ function initializeWorker() {
   currentResult = null;
   currentInference = null;
   filters.clear();
+  for (const detector of strokeDetectors.values()) detector.reset();
+  visibleHits.clear();
+  totalHits = 0;
+  ignoredHits = 0;
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
   worker.postMessage({
     type: 'initialize',
     generation,
@@ -554,6 +767,7 @@ async function start() {
     cameraDescription = `${width || '?'}×${height || '?'}${frameRate ? ` @ ${frameRate.toFixed(0)} FPS` : ''}`;
     video.srcObject = media;
     await video.play();
+    await openStrokeSession();
     empty.hidden = true;
     worker = new Worker('/tracking-worker.js', { type: 'module' });
     worker.onmessage = handleWorkerMessage;
@@ -571,6 +785,7 @@ async function start() {
 }
 
 function stop() {
+  closeStrokeSession();
   if (callbackId !== null) {
     if (callbackKind === 'video' && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callbackId);
     else cancelAnimationFrame(callbackId);
@@ -588,6 +803,10 @@ function stop() {
   currentResult = null;
   currentInference = null;
   filters.clear();
+  for (const detector of strokeDetectors.values()) detector.reset();
+  visibleHits.clear();
+  totalHits = 0;
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
   processedFps = 0;
   displayDelayMs = 0;
   cameraDescription = '—';
@@ -602,21 +821,25 @@ toggle.addEventListener('click', () => media ? stop() : start());
 delegateSelect.addEventListener('change', () => { if (worker && media) initializeWorker(); });
 responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; });
 layoutEdit.addEventListener('click', () => setEditingLayout(!editingLayout));
+boundaryEditButton.addEventListener('click', () => setEditingBoundary(!editingBoundary));
 layoutSave.addEventListener('click', saveKitLayout);
 layoutReset.addEventListener('click', () => {
   if (!defaultLayout) return;
   kitLayout = cloneLayout(defaultLayout);
   selectedZoneId = kitLayout.zones[0]?.id || null;
+  setEditingBoundary(false);
   updateZoneControls();
   setLayoutDirty(true);
 });
 zoneSelect.addEventListener('change', () => {
   selectedZoneId = zoneSelect.value;
   updateZoneControls();
+  requestRender();
 });
+showRaw.addEventListener('change', requestRender);
 canvas.addEventListener('pointerdown', beginZoneEdit);
 canvas.addEventListener('pointermove', continueZoneEdit);
 canvas.addEventListener('pointerup', endZoneEdit);
 canvas.addEventListener('pointercancel', endZoneEdit);
 loadKitLayout();
-render();
+requestRender();

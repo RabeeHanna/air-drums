@@ -39,10 +39,28 @@ class KitLayoutTests(unittest.TestCase):
             path = Path(directory) / "kit-layout.json"
             path.write_text(json.dumps(layout), encoding="utf-8")
             migrated = load_layout(path)
-            self.assertEqual(migrated["version"], 2)
+            self.assertEqual(migrated["version"], 4)
             self.assertEqual(migrated["zones"][0]["width"], 0.2)
             self.assertAlmostEqual(migrated["zones"][0]["height"], 0.14)
             self.assertEqual(load_layout(path), migrated)
+
+    def test_strike_boundary_is_saved_and_validated(self):
+        layout = default_layout()
+        layout["strikeBoundary"] = {"x": 0.41, "y": 0.62, "width": 0.62, "height": 0.434}
+        self.assertEqual(validate_layout(layout)["strikeBoundary"], layout["strikeBoundary"])
+        layout["strikeBoundary"]["width"] = 0.91
+        with self.assertRaises(LayoutValidationError):
+            validate_layout(layout)
+
+    def test_legacy_boundary_circle_migrates_to_editable_oval(self):
+        layout = default_layout()
+        layout["version"] = 3
+        layout["strikeBoundary"] = {"x": 0.41, "y": 0.62, "radius": 0.31}
+        migrated = validate_layout(layout)
+        self.assertEqual(migrated["version"], 4)
+        self.assertEqual(migrated["strikeBoundary"], {
+            "x": 0.41, "y": 0.62, "width": 0.62, "height": 0.434,
+        })
 
     def test_unknown_zone_is_rejected(self):
         layout = default_layout()
