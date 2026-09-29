@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101313">
-    <title>Air Drummer · Tracking Lab</title>
+    <title>Air Drummer · Kit Layout</title>
     <style>
       :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101313; color: #eff4ef; }
       * { box-sizing: border-box; }
@@ -19,7 +19,9 @@
       video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
       video { background: #080a09; }
       canvas { pointer-events: none; }
-      .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #849188; text-align: center; padding: 2rem; }
+      .view.editing canvas { pointer-events: auto; cursor: grab; }
+      .view.editing canvas:active { cursor: grabbing; }
+      .empty { position: absolute; inset: 0; display: grid; place-items: start center; color: #c0cbc2; text-align: center; padding: 1rem; pointer-events: none; text-shadow: 0 1px 4px #000; transform: scaleX(-1); }
       .statusbar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; padding: .85rem 1rem; border-top: 1px solid #2d3831; }
       #status { display: flex; align-items: center; gap: .6rem; color: #c7d4ca; }
       #status::before { content: ""; width: .65rem; height: .65rem; border-radius: 50%; background: #64746a; }
@@ -29,11 +31,13 @@
       .controls { display: flex; flex-wrap: wrap; align-items: end; gap: .8rem 1.1rem; padding: .9rem 1rem; background: #171c19; border-top: 1px solid #2d3831; }
       .control { display: grid; gap: .3rem; color: #aebdb2; font-size: .78rem; }
       select { min-width: 195px; border: 1px solid #3a463e; border-radius: 8px; padding: .55rem .7rem; background: #101613; color: #eff4ef; font: inherit; }
-      input[type="range"] { width: 160px; accent-color: #9de9b3; }
       .check { display: flex; align-items: center; gap: .45rem; color: #c7d4ca; font-size: .82rem; padding-bottom: .55rem; }
       .check input { accent-color: #9de9b3; }
       button { border: 0; border-radius: 999px; padding: .7rem 1.1rem; background: #b8f2cb; color: #122018; font: inherit; font-weight: 700; cursor: pointer; }
       button:disabled { opacity: .65; cursor: wait; }
+      button.secondary { background: #28352d; color: #e4eee6; border: 1px solid #435146; }
+      .layout-actions { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; }
+      .layout-help { color: #aebdb2; font-size: .8rem; min-height: 1.3em; }
       .hint { color: #93a197; font-size: .9rem; margin: 1rem .2rem; }
       .legend { display: flex; flex-wrap: wrap; gap: .45rem 1rem; color: #aebdb2; font-size: .78rem; margin: .85rem .2rem; }
       .legend span { display: inline-flex; align-items: center; gap: .4rem; }
@@ -50,14 +54,14 @@
   <body>
     <main>
       <header>
-        <div><p class="eyebrow">Milestone 1 · Tracking lab</p><h1>Air Drummer</h1></div>
+        <div><p class="eyebrow">Milestone 2 · Virtual kit layout</p><h1>Air Drummer</h1></div>
         <div class="metrics" id="metrics">Camera: — · Processed: — · Inference: — · Frame delay: —</div>
       </header>
       <section class="stage" aria-label="Webcam tracking preview">
         <div class="view" id="view">
           <video id="video" autoplay muted playsinline></video>
           <canvas id="overlay"></canvas>
-          <div class="empty" id="empty">Start the camera to track shoulders, elbows, and wrists.</div>
+          <div class="empty" id="empty" aria-hidden="true"></div>
         </div>
         <div class="statusbar">
           <div id="status" data-state="idle" role="status" aria-live="polite">Camera is off</div>
@@ -74,6 +78,19 @@
             <input id="responsiveness" type="range" min="0" max="100" value="55">
           </label>
           <label class="check"><input id="showRaw" type="checkbox"> Show raw pose points</label>
+          <div class="layout-actions">
+            <button class="secondary" id="layoutEdit" type="button" aria-pressed="false">Edit layout</button>
+            <button id="layoutSave" type="button" disabled>Save kit</button>
+            <button class="secondary" id="layoutReset" type="button">Reset zones</button>
+          </div>
+          <label class="control" for="zoneSelect">Selected zone
+            <select id="zoneSelect" disabled>
+              <option value="snare">Snare</option><option value="hi_hat">Hi-hat</option>
+              <option value="tom_1">Tom 1</option><option value="tom_2">Tom 2</option>
+              <option value="floor_tom">Floor tom</option><option value="crash">Crash</option>
+              <option value="ride">Ride</option>
+            </select>
+          </label>
         </div>
       </section>
       <div class="legend" aria-label="Marker legend">
@@ -81,7 +98,8 @@
         <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
       </div>
-      <p class="hint">Body pose tracking only. Keep both shoulders, elbows, and wrists in view. Motion response controls how closely the markers follow fast movement.</p>
+      <p class="hint">Edit the translucent oval regions in your mirrored view. Drag a region to move it, or drag its bounding-box handles to resize it. Regions may overlap; use Selected zone to choose which one to edit.</p>
+      <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
       <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>
     </main>

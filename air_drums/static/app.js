@@ -10,6 +10,12 @@ const responseSlider = document.querySelector('#responsiveness');
 const responseValue = document.querySelector('#responseValue');
 const showRaw = document.querySelector('#showRaw');
 const delegateNote = document.querySelector('#delegateNote');
+const view = document.querySelector('#view');
+const layoutEdit = document.querySelector('#layoutEdit');
+const layoutSave = document.querySelector('#layoutSave');
+const layoutReset = document.querySelector('#layoutReset');
+const layoutHelp = document.querySelector('#layoutHelp');
+const zoneSelect = document.querySelector('#zoneSelect');
 
 const POSE_CONNECTIONS = [[11, 13], [13, 15], [12, 14], [14, 16], [11, 12]];
 const POSE_COLORS = { shoulder: '#61aaff', elbow: '#43e0b5', wrist: '#f5cb5c' };
@@ -30,6 +36,12 @@ let resultCount = 0;
 let resultWindowStarted = performance.now();
 let processedFps = 0;
 let displayDelayMs = 0;
+let kitLayout = null;
+let defaultLayout = null;
+let selectedZoneId = null;
+let dragging = null;
+let editingLayout = false;
+let layoutDirty = false;
 const filters = new Map();
 
 function setStatus(text, state = 'idle') {
@@ -135,13 +147,18 @@ function drawDot(point, label, color, width, height, radius = 8) {
   ctx.strokeStyle = '#101313';
   ctx.stroke();
   if (label) {
+    const labelY = y - Math.max(12, width * 0.015);
     ctx.font = `700 ${Math.max(12, width * 0.015)}px system-ui`;
     ctx.textAlign = 'center';
     ctx.lineWidth = Math.max(3, width * 0.004);
     ctx.strokeStyle = '#101313';
-    ctx.strokeText(label, x, y - Math.max(12, width * 0.015));
+    ctx.save();
+    ctx.translate(x, labelY);
+    ctx.scale(-1, 1);
+    ctx.strokeText(label, 0, 0);
     ctx.fillStyle = '#fff';
-    ctx.fillText(label, x, y - Math.max(12, width * 0.015));
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
   }
 }
 
@@ -184,11 +201,247 @@ function drawPose(rawPose, filteredPose, width, height) {
   }
 }
 
+function drawKitLayout(width, height) {
+  if (!kitLayout) return;
+  const shortSide = Math.min(width, height);
+  for (const zone of kitLayout.zones) {
+    const x = zone.x * width;
+    const y = zone.y * height;
+    const rx = zone.width * shortSide / 2;
+    const ry = zone.height * shortSide / 2;
+    const selected = zone.id === selectedZoneId;
+    ctx.beginPath();
+    ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+    ctx.globalAlpha = editingLayout ? 0.20 : 0.12;
+    ctx.fillStyle = zone.color;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.setLineDash(editingLayout && selected ? [8, 5] : []);
+    ctx.lineWidth = selected && editingLayout ? 4 : 2;
+    ctx.strokeStyle = zone.color;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (editingLayout && selected) drawResizeBox(zone, width, height);
+    ctx.font = `700 ${Math.max(12, width * 0.018)}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.lineWidth = Math.max(3, width * 0.004);
+    ctx.strokeStyle = '#101313';
+    ctx.save();
+    ctx.translate(x, y - ry - Math.max(8, width * 0.012));
+    ctx.scale(-1, 1);
+    ctx.strokeText(zone.label, 0, 0);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(zone.label, 0, 0);
+    ctx.restore();
+  }
+}
+
+function zoneBounds(zone, width = canvas.width, height = canvas.height) {
+  const rx = zone.width * Math.min(width, height) / 2;
+  const ry = zone.height * Math.min(width, height) / 2;
+  return { left: zone.x * width - rx, right: zone.x * width + rx, top: zone.y * height - ry, bottom: zone.y * height + ry };
+}
+
+function resizeHandlePoints(zone) {
+  const b = zoneBounds(zone);
+  const mx = (b.left + b.right) / 2;
+  const my = (b.top + b.bottom) / 2;
+  return { nw: [b.left, b.top], n: [mx, b.top], ne: [b.right, b.top], e: [b.right, my], se: [b.right, b.bottom], s: [mx, b.bottom], sw: [b.left, b.bottom], w: [b.left, my] };
+}
+
+function drawResizeBox(zone, width, height) {
+  const bounds = zoneBounds(zone, width, height);
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+  ctx.setLineDash([]);
+  const size = Math.max(7, width * 0.009);
+  for (const [x, y] of Object.values(resizeHandlePoints(zone))) {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x - size / 2, y - size / 2, size, size);
+    ctx.strokeStyle = '#172019';
+    ctx.strokeRect(x - size / 2, y - size / 2, size, size);
+  }
+  ctx.restore();
+}
+
 function render() {
   setCanvasSize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawKitLayout(canvas.width, canvas.height);
   if (currentResult) drawPose(currentResult.pose, currentResult.filteredPose, canvas.width, canvas.height);
   requestAnimationFrame(render);
+}
+
+function cloneLayout(layout) {
+  return JSON.parse(JSON.stringify(layout));
+}
+
+function setLayoutDirty(dirty) {
+  layoutDirty = dirty;
+  layoutSave.disabled = !dirty;
+  layoutHelp.textContent = dirty
+    ? 'Unsaved kit changes. Save kit to keep these positions.'
+    : 'Kit layout loaded.';
+}
+
+function updateZoneControls() {
+  zoneSelect.disabled = !kitLayout;
+  if (selectedZoneId) zoneSelect.value = selectedZoneId;
+}
+
+async function loadKitLayout() {
+  try {
+    const [layoutResponse, defaultsResponse] = await Promise.all([
+      fetch('/api/kit-layout'),
+      fetch('/api/kit-layout/defaults'),
+    ]);
+    if (!layoutResponse.ok || !defaultsResponse.ok) throw new Error('Could not load kit layout settings');
+    kitLayout = await layoutResponse.json();
+    defaultLayout = await defaultsResponse.json();
+    selectedZoneId = kitLayout.zones[0]?.id || null;
+    updateZoneControls();
+    setLayoutDirty(false);
+  } catch (error) {
+    layoutHelp.textContent = `Kit layout unavailable: ${error.message}`;
+    layoutSave.disabled = true;
+  }
+}
+
+function pointFromPointer(event) {
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.max(rect.width / canvas.width, rect.height / canvas.height);
+  const displayedWidth = canvas.width * scale;
+  const displayedHeight = canvas.height * scale;
+  const offsetX = (rect.width - displayedWidth) / 2;
+  const offsetY = (rect.height - displayedHeight) / 2;
+  const displayX = (event.clientX - rect.left - offsetX) / displayedWidth;
+  const displayY = (event.clientY - rect.top - offsetY) / displayedHeight;
+  // The preview is mirrored; convert the pointer position back to raw camera
+  // coordinates so the saved zones line up with MediaPipe's landmarks.
+  return { x: 1 - displayX, y: displayY };
+}
+
+function zoneAt(point) {
+  if (!kitLayout) return null;
+  const width = canvas.width;
+  const height = canvas.height;
+  const shortSide = Math.min(width, height);
+  return kitLayout.zones.map(zone => {
+    const dx = (point.x - zone.x) * width / (zone.width * shortSide / 2);
+    const dy = (point.y - zone.y) * height / (zone.height * shortSide / 2);
+    return { zone, distance: dx * dx + dy * dy };
+  }).filter(({ distance }) => distance <= 1).sort((a, b) => a.distance - b.distance)[0]?.zone || null;
+}
+
+function moveZone(zoneId, point) {
+  const zone = kitLayout?.zones.find(item => item.id === zoneId);
+  if (!zone) return;
+  const shortSide = Math.min(canvas.width, canvas.height);
+  const marginX = (zone.width * shortSide / 2) / canvas.width;
+  const marginY = (zone.height * shortSide / 2) / canvas.height;
+  zone.x = Math.max(marginX, Math.min(1 - marginX, point.x));
+  zone.y = Math.max(marginY, Math.min(1 - marginY, point.y));
+  setLayoutDirty(true);
+}
+
+function beginZoneEdit(event) {
+  if (!editingLayout) return;
+  const point = pointFromPointer(event);
+  const zone = kitLayout?.zones.find(item => item.id === selectedZoneId);
+  const handles = zone ? resizeHandlePoints(zone) : {};
+  const handleRadius = Math.max(10 / canvas.width, 0.012);
+  const handle = Object.entries(handles).find(([, [x, y]]) => {
+    const pointX = 1 - point.x;
+    const handleX = 1 - x / canvas.width;
+    const pointY = point.y;
+    const handleY = y / canvas.height;
+    return Math.hypot((pointX - handleX) * canvas.width, (pointY - handleY) * canvas.height) <= Math.max(12, canvas.width * handleRadius);
+  })?.[0];
+  if (zone && handle) {
+    dragging = { mode: 'resize', zoneId: zone.id, handle, point, x: zone.x, y: zone.y, width: zone.width, height: zone.height };
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+  const hit = zoneAt(point);
+  // Clicking a selected overlap edits the selected region; the selector can
+  // explicitly switch to another region occupying the same camera space.
+  const selectedHit = zone && (() => {
+    const dx = (point.x - zone.x) * canvas.width / (zone.width * Math.min(canvas.width, canvas.height) / 2);
+    const dy = (point.y - zone.y) * canvas.height / (zone.height * Math.min(canvas.width, canvas.height) / 2);
+    return dx * dx + dy * dy <= 1;
+  })();
+  const target = selectedHit ? zone : hit;
+  if (!target) return;
+  selectedZoneId = target.id;
+  dragging = { mode: 'move', zoneId: target.id };
+  canvas.setPointerCapture(event.pointerId);
+  updateZoneControls();
+}
+
+function continueZoneEdit(event) {
+  if (!editingLayout || !dragging) return;
+  const point = pointFromPointer(event);
+  if (dragging.mode === 'move') {
+    moveZone(dragging.zoneId, point);
+    return;
+  }
+  const zone = kitLayout.zones.find(item => item.id === dragging.zoneId);
+  if (!zone) return;
+  const shortSide = Math.min(canvas.width, canvas.height);
+  const dx = (point.x - dragging.point.x) * canvas.width;
+  const dy = (point.y - dragging.point.y) * canvas.height;
+  const h = dragging.handle;
+  let width = dragging.width;
+  let height = dragging.height;
+  let x = dragging.x;
+  let y = dragging.y;
+  if (h.includes('e')) { width += 2 * dx / shortSide; x += dx / (2 * canvas.width); }
+  if (h.includes('w')) { width -= 2 * dx / shortSide; x += dx / (2 * canvas.width); }
+  if (h.includes('s')) { height += 2 * dy / shortSide; y += dy / (2 * canvas.height); }
+  if (h.includes('n')) { height -= 2 * dy / shortSide; y += dy / (2 * canvas.height); }
+  zone.width = Math.max(0.06, Math.min(0.70, width));
+  zone.height = Math.max(0.06, Math.min(0.50, height));
+  zone.x = Math.max(zone.width * shortSide / (2 * canvas.width), Math.min(1 - zone.width * shortSide / (2 * canvas.width), x));
+  zone.y = Math.max(zone.height * shortSide / (2 * canvas.height), Math.min(1 - zone.height * shortSide / (2 * canvas.height), y));
+  setLayoutDirty(true);
+}
+
+function endZoneEdit(event) {
+  if (dragging && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  dragging = null;
+}
+
+function setEditingLayout(editing) {
+  editingLayout = editing;
+  view.classList.toggle('editing', editing);
+  layoutEdit.setAttribute('aria-pressed', String(editing));
+  layoutEdit.textContent = editing ? 'Done editing' : 'Edit layout';
+  layoutHelp.textContent = editing
+    ? 'Drag an oval to move it. Drag one of its eight bounding-box handles to resize it. Overlap is allowed.'
+    : layoutDirty ? 'Unsaved kit changes. Save kit to keep these positions.' : 'Kit layout loaded.';
+  updateZoneControls();
+}
+
+async function saveKitLayout() {
+  layoutSave.disabled = true;
+  layoutHelp.textContent = 'Saving kit layout…';
+  try {
+    const response = await fetch('/api/kit-layout', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(kitLayout),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    kitLayout = await response.json();
+    setLayoutDirty(false);
+    updateZoneControls();
+  } catch (error) {
+    layoutSave.disabled = false;
+    layoutHelp.textContent = `Could not save kit layout: ${error.message}`;
+  }
 }
 
 function updateMetrics() {
@@ -348,4 +601,22 @@ function stop() {
 toggle.addEventListener('click', () => media ? stop() : start());
 delegateSelect.addEventListener('change', () => { if (worker && media) initializeWorker(); });
 responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; });
+layoutEdit.addEventListener('click', () => setEditingLayout(!editingLayout));
+layoutSave.addEventListener('click', saveKitLayout);
+layoutReset.addEventListener('click', () => {
+  if (!defaultLayout) return;
+  kitLayout = cloneLayout(defaultLayout);
+  selectedZoneId = kitLayout.zones[0]?.id || null;
+  updateZoneControls();
+  setLayoutDirty(true);
+});
+zoneSelect.addEventListener('change', () => {
+  selectedZoneId = zoneSelect.value;
+  updateZoneControls();
+});
+canvas.addEventListener('pointerdown', beginZoneEdit);
+canvas.addEventListener('pointermove', continueZoneEdit);
+canvas.addEventListener('pointerup', endZoneEdit);
+canvas.addEventListener('pointercancel', endZoneEdit);
+loadKitLayout();
 render();

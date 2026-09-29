@@ -18,6 +18,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY air_drums ./air_drums
+COPY tests ./tests
 COPY --from=vision-assets /assets ./air_drums/static/assets
 
 EXPOSE 8000
