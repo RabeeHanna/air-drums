@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101313">
+    <title>Air Drummer · Tracking Lab</title>
+    <style>
+      :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101313; color: #eff4ef; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; padding: clamp(1rem, 4vw, 3rem); }
+      main { width: min(100%, 1160px); margin: 0 auto; }
+      header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
+      h1 { font-size: clamp(1.5rem, 4vw, 2.35rem); letter-spacing: -.04em; margin: 0; }
+      .eyebrow { color: #a2b2a7; font-size: .78rem; letter-spacing: .13em; text-transform: uppercase; margin: 0 0 .35rem; }
+      .metrics { color: #c7d4ca; font-size: .9rem; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+      .stage { background: #080a09; border: 1px solid #2d3831; border-radius: 18px; overflow: hidden; }
+      .view { position: relative; width: 100%; aspect-ratio: 16 / 9; transform: scaleX(-1); }
+      video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      video { background: #080a09; }
+      canvas { pointer-events: none; }
+      .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #849188; text-align: center; padding: 2rem; }
+      .statusbar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; padding: .85rem 1rem; border-top: 1px solid #2d3831; }
+      #status { display: flex; align-items: center; gap: .6rem; color: #c7d4ca; }
+      #status::before { content: ""; width: .65rem; height: .65rem; border-radius: 50%; background: #64746a; }
+      #status[data-state="ready"]::before { background: #7be0a1; box-shadow: 0 0 12px #7be08080; }
+      #status[data-state="busy"]::before { background: #f4c96b; }
+      #status[data-state="error"]::before { background: #ff7979; }
+      .controls { display: flex; flex-wrap: wrap; align-items: end; gap: .8rem 1.1rem; padding: .9rem 1rem; background: #171c19; border-top: 1px solid #2d3831; }
+      .control { display: grid; gap: .3rem; color: #aebdb2; font-size: .78rem; }
+      select { min-width: 195px; border: 1px solid #3a463e; border-radius: 8px; padding: .55rem .7rem; background: #101613; color: #eff4ef; font: inherit; }
+      input[type="range"] { width: 160px; accent-color: #9de9b3; }
+      .check { display: flex; align-items: center; gap: .45rem; color: #c7d4ca; font-size: .82rem; padding-bottom: .55rem; }
+      .check input { accent-color: #9de9b3; }
+      button { border: 0; border-radius: 999px; padding: .7rem 1.1rem; background: #b8f2cb; color: #122018; font: inherit; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: .65; cursor: wait; }
+      .hint { color: #93a197; font-size: .9rem; margin: 1rem .2rem; }
+      .legend { display: flex; flex-wrap: wrap; gap: .45rem 1rem; color: #aebdb2; font-size: .78rem; margin: .85rem .2rem; }
+      .legend span { display: inline-flex; align-items: center; gap: .4rem; }
+      .swatch { width: .65rem; height: .65rem; display: inline-block; border-radius: 50%; }
+      .note { color: #8e9e93; font-size: .78rem; margin: .8rem .2rem; }
+      @media (max-width: 650px) {
+        header { align-items: start; flex-direction: column; }
+        .metrics { text-align: left; white-space: normal; }
+        .statusbar { align-items: start; flex-direction: column; }
+        .view { aspect-ratio: 4 / 3; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div><p class="eyebrow">Milestone 1 · Tracking lab</p><h1>Air Drummer</h1></div>
+        <div class="metrics" id="metrics">Camera: — · Processed: — · Inference: — · Frame delay: —</div>
+      </header>
+      <section class="stage" aria-label="Webcam tracking preview">
+        <div class="view" id="view">
+          <video id="video" autoplay muted playsinline></video>
+          <canvas id="overlay"></canvas>
+          <div class="empty" id="empty">Start the camera to track shoulders, elbows, and wrists.</div>
+        </div>
+        <div class="statusbar">
+          <div id="status" data-state="idle" role="status" aria-live="polite">Camera is off</div>
+          <button id="toggle" type="button">Start camera</button>
+        </div>
+        <div class="controls">
+          <label class="control" for="delegate">Execution
+            <select id="delegate">
+              <option value="auto" selected>Auto · GPU then CPU fallback</option>
+              <option value="CPU">CPU only</option>
+            </select>
+          </label>
+          <label class="control" for="responsiveness">Motion response <span id="responseValue">55%</span>
+            <input id="responsiveness" type="range" min="0" max="100" value="55">
+          </label>
+          <label class="check"><input id="showRaw" type="checkbox"> Show raw pose points</label>
+        </div>
+      </section>
+      <div class="legend" aria-label="Marker legend">
+        <span><i class="swatch" style="background:#61aaff"></i>Pose shoulder</span>
+        <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
+        <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
+      </div>
+      <p class="hint">Body pose tracking only. Keep both shoulders, elbows, and wrists in view. Motion response controls how closely the markers follow fast movement.</p>
+      <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
+      <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
