@@ -22,7 +22,7 @@ DEFAULT_ZONES: tuple[dict[str, Any], ...] = (
     {"id": "ride", "label": "Ride", "x": 0.27, "y": 0.28, "width": 0.25, "height": 0.16, "color": "#fd7ee2"},
 )
 ZONE_IDS = frozenset(zone["id"] for zone in DEFAULT_ZONES)
-DEFAULT_STRIKE_BOUNDARY = {"x": 0.5, "y": 0.55, "width": 0.84, "height": 0.588}
+DEFAULT_STRIKE_BOUNDARY = {"left": 0.16, "top": 0.16, "right": 0.84, "bottom": 0.84}
 
 
 class LayoutValidationError(ValueError):
@@ -31,7 +31,7 @@ class LayoutValidationError(ValueError):
 
 def default_layout() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 5,
         "zones": [dict(zone) for zone in DEFAULT_ZONES],
         "strikeBoundary": dict(DEFAULT_STRIKE_BOUNDARY),
     }
@@ -44,8 +44,8 @@ def _number(value: Any, field: str, zone_id: str) -> float:
 
 
 def validate_layout(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("version") not in (1, 2, 3, 4):
-        raise LayoutValidationError("layout must be an object with version 1, 2, 3, or 4")
+    if not isinstance(value, dict) or value.get("version") not in (1, 2, 3, 4, 5):
+        raise LayoutValidationError("layout must be an object with version 1, 2, 3, 4, or 5")
     legacy_circles = value["version"] == 1
     zones = value.get("zones")
     if not isinstance(zones, list) or len(zones) != len(DEFAULT_ZONES):
@@ -83,28 +83,28 @@ def validate_layout(value: Any) -> dict[str, Any]:
     zones_out = []
     for default in DEFAULT_ZONES:
         zones_out.append({**default, **by_id[default["id"]]})
-    boundary = value.get("strikeBoundary", DEFAULT_STRIKE_BOUNDARY)
-    if not isinstance(boundary, dict):
-        raise LayoutValidationError("strikeBoundary must be an object")
-    boundary_x = _number(boundary.get("x"), "x", "strikeBoundary")
-    boundary_y = _number(boundary.get("y"), "y", "strikeBoundary")
-    if value["version"] < 4:
-        boundary_radius = _number(boundary.get("radius", 0.42), "radius", "strikeBoundary")
-        boundary_width = boundary_radius * 2
-        boundary_height = boundary_radius * 1.4
+    if value["version"] < 5:
+        # Replace the old center/size oval-style boundary with a fresh rectangle.
+        boundary_out = dict(DEFAULT_STRIKE_BOUNDARY)
     else:
-        boundary_width = _number(boundary.get("width"), "width", "strikeBoundary")
-        boundary_height = _number(boundary.get("height"), "height", "strikeBoundary")
-    if not 0 <= boundary_x <= 1 or not 0 <= boundary_y <= 1:
-        raise LayoutValidationError("strikeBoundary position must be normalized between 0 and 1")
-    if not 0.08 <= boundary_width <= 0.90:
-        raise LayoutValidationError("strikeBoundary width must be between 0.08 and 0.90")
-    if not 0.08 <= boundary_height <= 0.70:
-        raise LayoutValidationError("strikeBoundary height must be between 0.08 and 0.70")
+        boundary = value.get("strikeBoundary")
+        if not isinstance(boundary, dict):
+            raise LayoutValidationError("strikeBoundary must be an object")
+        left = _number(boundary.get("left"), "left", "strikeBoundary")
+        top = _number(boundary.get("top"), "top", "strikeBoundary")
+        right = _number(boundary.get("right"), "right", "strikeBoundary")
+        bottom = _number(boundary.get("bottom"), "bottom", "strikeBoundary")
+        if not (0 <= left <= 1 and 0 <= top <= 1 and 0 <= right <= 1 and 0 <= bottom <= 1):
+            raise LayoutValidationError("strikeBoundary edges must be normalized between 0 and 1")
+        if not 0.08 <= right - left <= 0.96:
+            raise LayoutValidationError("strikeBoundary width must be between 0.08 and 0.96")
+        if not 0.08 <= bottom - top <= 0.96:
+            raise LayoutValidationError("strikeBoundary height must be between 0.08 and 0.96")
+        boundary_out = {"left": left, "top": top, "right": right, "bottom": bottom}
     return {
-        "version": 4,
+        "version": 5,
         "zones": zones_out,
-        "strikeBoundary": {"x": boundary_x, "y": boundary_y, "width": boundary_width, "height": boundary_height},
+        "strikeBoundary": boundary_out,
     }
 
 
@@ -132,7 +132,7 @@ def load_layout(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         layout = validate_layout(value)
-        if value.get("version") != 4:
+        if value.get("version") != 5:
             return save_layout(path, layout)
         return layout
     except (OSError, json.JSONDecodeError, LayoutValidationError) as error:

@@ -1,5 +1,7 @@
-import { isWithinBoundary, StrokeDetector } from './stroke-detector.mjs';
+import { StrokeDetector } from './stroke-detector.mjs';
+import { isWithinBoundary, moveBoundary, resizeBoundary } from './hit-boundary.mjs';
 import { comparePredictions, TargetPredictor } from './target-predictor.mjs';
+import { indexFingertip } from './hit-point.mjs';
 
 const video = document.querySelector('#video');
 const canvas = document.querySelector('#overlay');
@@ -13,6 +15,13 @@ const empty = document.querySelector('#empty');
 const delegateSelect = document.querySelector('#delegate');
 const responseSlider = document.querySelector('#responsiveness');
 const responseValue = document.querySelector('#responseValue');
+const downThresholdSlider = document.querySelector('#downThreshold');
+const downThresholdValue = document.querySelector('#downThresholdValue');
+const minTravelSlider = document.querySelector('#minTravel');
+const minTravelValue = document.querySelector('#minTravelValue');
+const impactDropSlider = document.querySelector('#impactDrop');
+const impactDropValue = document.querySelector('#impactDropValue');
+const resetStrokeSettingsButton = document.querySelector('#resetStrokeSettings');
 const showRaw = document.querySelector('#showRaw');
 const delegateNote = document.querySelector('#delegateNote');
 const view = document.querySelector('#view');
@@ -24,7 +33,24 @@ const zoneSelect = document.querySelector('#zoneSelect');
 const boundaryEditButton = document.querySelector('#boundaryEdit');
 
 const POSE_CONNECTIONS = [[11, 13], [13, 15], [12, 14], [14, 16], [11, 12]];
-const POSE_COLORS = { shoulder: '#61aaff', elbow: '#43e0b5', wrist: '#f5cb5c' };
+const POSE_COLORS = { shoulder: '#61aaff', elbow: '#43e0b5', wrist: '#f5cb5c', fingertip: '#ff9e64' };
+const DETECTOR_DEFAULTS = { downThreshold: 0.55, minTravel: 0.05, impactDrop: 0.62 };
+const DETECTOR_LIMITS = { downThreshold: [0.2, 1.5], minTravel: [0.015, 0.12], impactDrop: [0.35, 0.9] };
+
+function loadDetectorSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('airDrums.strokeSettings') || '{}');
+    return Object.fromEntries(Object.entries(DETECTOR_DEFAULTS).map(([key, fallback]) => {
+      const [minimum, maximum] = DETECTOR_LIMITS[key];
+      const value = Number(saved[key]);
+      return [key, Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback];
+    }));
+  } catch {
+    return { ...DETECTOR_DEFAULTS };
+  }
+}
+
+const detectorSettings = loadDetectorSettings();
 
 let media = null;
 let worker = null;
@@ -51,8 +77,8 @@ let layoutDirty = false;
 let editingBoundary = false;
 const filters = new Map();
 const strokeDetectors = new Map([
-  ['left', new StrokeDetector('left')],
-  ['right', new StrokeDetector('right')],
+  ['left', new StrokeDetector('left', detectorSettings)],
+  ['right', new StrokeDetector('right', detectorSettings)],
 ]);
 const targetPredictors = new Map([
   ['left', new TargetPredictor()],
@@ -61,6 +87,8 @@ const targetPredictors = new Map([
 const visibleHits = new Map();
 let totalHits = 0;
 let ignoredHits = 0;
+let detectedStrokes = 0;
+let missingTipStrokes = 0;
 let lastPredictionComparison = '';
 let strokeSessionId = null;
 let strokeWriteQueue = Promise.resolve();
@@ -133,8 +161,8 @@ class OneEuroPoint {
 
 function smooth(key, point, timestampMs) {
   if (!point) return null;
-  const isWrist = key.endsWith('Wrist');
-  const tuning = isWrist
+  const isFastPoint = key.endsWith('Wrist') || key.endsWith('Index');
+  const tuning = isFastPoint
     ? { minCutoff: 0.7, beta: response => 0.005 + response * 0.22 }
     : { minCutoff: 0.45, beta: response => 0.02 + response * 0.07 };
   let filter = filters.get(key);
@@ -215,6 +243,8 @@ function drawPose(rawPose, filteredPose, width, height) {
     ['rightElbow', 'R elbow', POSE_COLORS.elbow],
     ['leftWrist', 'L wrist', POSE_COLORS.wrist],
     ['rightWrist', 'R wrist', POSE_COLORS.wrist],
+    ['leftIndex', 'L index', POSE_COLORS.fingertip],
+    ['rightIndex', 'R index', POSE_COLORS.fingertip],
   ];
   for (const [key, label, color] of joints) {
     if (showRaw.checked) drawDot(rawPose?.[key], '', '#ffffff99', width, height, 4);
@@ -278,23 +308,33 @@ function detectStrokes(pose, timestampMs) {
     const predictor = targetPredictors.get(hand);
     const priorPrediction = predictor.predictions;
     const result = detector.update(point, timestampMs, shoulderScale, aspectRatio);
-    const prediction = result.event ? priorPrediction : predictor.update(point, timestampMs, shoulderScale, aspectRatio, {
+    const wristPrediction = result.event ? priorPrediction : predictor.update(point, timestampMs, shoulderScale, aspectRatio, {
       active: result.state === 'downswing',
       peakDownSpeed: detector.peakDownSpeed,
       impactDrop: detector.impactDrop,
     });
+    const fingertip = indexFingertip(currentResult?.filteredPose, hand);
+    const fingertipValid = Boolean(fingertip);
+    const prediction = result.event ? wristPrediction : wristPrediction && fingertipValid ? {
+      ...wristPrediction,
+      fixed: wristPrediction.fixed ? { ...wristPrediction.fixed, x: wristPrediction.fixed.x + fingertip.x - point.x, y: wristPrediction.fixed.y + fingertip.y - point.y } : null,
+      deceleration: wristPrediction.deceleration ? { ...wristPrediction.deceleration, x: wristPrediction.deceleration.x + fingertip.x - point.x, y: wristPrediction.deceleration.y + fingertip.y - point.y } : null,
+    } : null;
+    if (!result.event) predictor.predictions = prediction;
     if (result.event) {
-      result.event.x = point.x;
-      result.event.y = point.y;
-      result.event.insideHitArea = isInsideStrikeBoundary(point);
-      result.event.actualZoneId = nearestZone(point)?.id ?? null;
-      result.event.predictions = comparePredictions(
+      detectedStrokes += 1;
+      const hitPoint = fingertipValid ? fingertip : null;
+      result.event.x = hitPoint?.x ?? null;
+      result.event.y = hitPoint?.y ?? null;
+      result.event.insideHitArea = hitPoint ? isInsideStrikeBoundary(hitPoint) : false;
+      result.event.actualZoneId = hitPoint ? nearestZone(hitPoint)?.id ?? null : null;
+      result.event.predictions = hitPoint ? comparePredictions(
         prediction || predictor.predictions,
         result.event,
         canvas.width,
         canvas.height,
         kitLayout?.zones ?? [],
-      );
+      ) : null;
       const modelSummaries = [['fixed', '120ms'], ['deceleration', 'turn']].map(([model, label]) => {
         const item = result.event.predictions?.[model];
         if (!item) return `${label} unavailable`;
@@ -305,10 +345,11 @@ function detectStrokes(pose, timestampMs) {
       lastPredictionComparison = `${hand === 'left' ? 'L' : 'R'} impact · ${modelSummaries.join(' · ')}`;
       if (result.event.insideHitArea) {
         totalHits += 1;
-        visibleHits.set(hand, { point: { x: point.x, y: point.y }, until: performance.now() + 280 });
+        visibleHits.set(hand, { point: { x: hitPoint.x, y: hitPoint.y }, until: performance.now() + 280 });
         requestRender();
       } else {
         ignoredHits += 1;
+        if (!hitPoint) missingTipStrokes += 1;
       }
       logStroke(result.event);
       predictor.reset();
@@ -317,7 +358,34 @@ function detectStrokes(pose, timestampMs) {
     }
   }
   updatePredictionReadout();
-  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Hits ${totalHits} · Outside ${ignoredHits}`;
+  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Detected ${detectedStrokes} · Hits ${totalHits} · Outside ${ignoredHits - missingTipStrokes} · No fingertip ${missingTipStrokes}`;
+}
+
+function updateDetectorSettings() {
+  detectorSettings.downThreshold = Number(downThresholdSlider.value);
+  detectorSettings.minTravel = Number(minTravelSlider.value);
+  detectorSettings.impactDrop = Number(impactDropSlider.value);
+  downThresholdValue.textContent = detectorSettings.downThreshold.toFixed(2);
+  minTravelValue.textContent = detectorSettings.minTravel.toFixed(3);
+  impactDropValue.textContent = detectorSettings.impactDrop.toFixed(2);
+  for (const detector of strokeDetectors.values()) Object.assign(detector, detectorSettings);
+  try {
+    localStorage.setItem('airDrums.strokeSettings', JSON.stringify(detectorSettings));
+  } catch {
+    // Settings still apply for this page even when browser storage is unavailable.
+  }
+}
+
+function initializeDetectorSettings() {
+  downThresholdSlider.value = detectorSettings.downThreshold;
+  minTravelSlider.value = detectorSettings.minTravel;
+  impactDropSlider.value = detectorSettings.impactDrop;
+  updateDetectorSettings();
+}
+
+function resetDetectorSettings() {
+  Object.assign(detectorSettings, DETECTOR_DEFAULTS);
+  initializeDetectorSettings();
 }
 
 function updatePredictionReadout() {
@@ -338,7 +406,7 @@ function updatePredictionReadout() {
 }
 
 function isInsideStrikeBoundary(point) {
-  return isWithinBoundary(point, kitLayout?.strikeBoundary, canvas.width, canvas.height);
+  return isWithinBoundary(point, kitLayout?.strikeBoundary);
 }
 
 async function openStrokeSession() {
@@ -399,14 +467,15 @@ function drawKitLayout(width, height) {
 function drawStrikeBoundary(width, height) {
   if (!kitLayout?.strikeBoundary) return;
   const boundary = kitLayout.strikeBoundary;
-  const { x, y } = boundary;
-  const cx = x * width;
-  const cy = y * height;
-  const rx = boundary.width * Math.min(width, height) / 2;
-  const ry = boundary.height * Math.min(width, height) / 2;
+  const left = boundary.left * width;
+  const top = boundary.top * height;
+  const right = boundary.right * width;
+  const bottom = boundary.bottom * height;
+  const cx = (left + right) / 2;
+  const cy = (top + bottom) / 2;
   ctx.save();
   ctx.beginPath();
-  ctx.rect(cx - rx, cy - ry, rx * 2, ry * 2);
+  ctx.rect(left, top, right - left, bottom - top);
   ctx.fillStyle = '#ffffff';
   ctx.globalAlpha = editingBoundary ? 0.08 : 0.035;
   ctx.fill();
@@ -421,14 +490,30 @@ function drawStrikeBoundary(width, height) {
   ctx.lineWidth = Math.max(3, width * 0.004);
   ctx.strokeStyle = '#101313';
   ctx.save();
-  ctx.translate(cx, cy - ry - Math.max(10, width * 0.012));
+  ctx.translate(cx, top - Math.max(10, width * 0.012));
   ctx.scale(-1, 1);
   ctx.strokeText('HIT AREA', 0, 0);
   ctx.fillStyle = '#fff';
   ctx.fillText('HIT AREA', 0, 0);
   ctx.restore();
-  if (editingBoundary) drawResizeBox(boundary, width, height);
+  if (editingBoundary) drawBoundaryHandles(boundary, width, height);
   ctx.restore();
+}
+
+function drawBoundaryHandles(boundary, width, height) {
+  const size = Math.max(12, width * 0.018);
+  const corners = [
+    [boundary.left, boundary.top], [boundary.right, boundary.top],
+    [boundary.right, boundary.bottom], [boundary.left, boundary.bottom],
+  ];
+  for (const [x, y] of corners) {
+    const screenX = (1 - x) * width;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(screenX - size / 2, y * height - size / 2, size, size);
+    ctx.strokeStyle = '#172019';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(screenX - size / 2, y * height - size / 2, size, size);
+  }
 }
 
 function nearestZone(point) {
@@ -453,7 +538,7 @@ function drawTargetPredictions(width, height) {
       if (!prediction) continue;
       const x = prediction.x * width;
       const y = prediction.y * height;
-      const wrist = currentResult?.pose?.[`${hand}Wrist`];
+      const wrist = currentResult?.filteredPose?.[`${hand}Index`];
       ctx.save();
       ctx.beginPath();
       ctx.moveTo((wrist?.x ?? prediction.x) * width, (wrist?.y ?? prediction.y) * height);
@@ -675,9 +760,9 @@ function beginBoundaryEdit(event) {
   const boundary = kitLayout?.strikeBoundary;
   if (!boundary) return;
   const point = pointFromPointer(event);
-  const handle = resizeHandleAt(point, boundary);
-  if (handle) dragging = { mode: 'resize', region: boundary, handle, point, ...boundary };
-  else if (isWithinBoundary(point, boundary, canvas.width, canvas.height)) dragging = { mode: 'move', region: boundary };
+  const handle = boundaryCornerAt(point, boundary);
+  if (handle) dragging = { mode: 'resizeBoundary', corner: handle, startPoint: point, startBoundary: { ...boundary }, region: boundary };
+  else if (isWithinBoundary(point, boundary)) dragging = { mode: 'moveBoundary', startPoint: point, startBoundary: { ...boundary }, region: boundary };
   else return;
   canvas.setPointerCapture(event.pointerId);
   requestRender();
@@ -686,6 +771,25 @@ function beginBoundaryEdit(event) {
 function continueZoneEdit(event) {
   if ((!editingLayout && !editingBoundary) || !dragging) return;
   const point = pointFromPointer(event);
+  if (dragging.mode === 'moveBoundary') {
+    Object.assign(dragging.region, moveBoundary(
+      dragging.startBoundary,
+      point.x - dragging.startPoint.x,
+      point.y - dragging.startPoint.y,
+    ));
+    setLayoutDirty(true);
+    return;
+  }
+  if (dragging.mode === 'resizeBoundary') {
+    Object.assign(dragging.region, resizeBoundary(
+      dragging.startBoundary,
+      dragging.corner,
+      point.x - dragging.startPoint.x,
+      point.y - dragging.startPoint.y,
+    ));
+    setLayoutDirty(true);
+    return;
+  }
   if (dragging.mode === 'move') {
     moveRegion(dragging.region, point);
     return;
@@ -694,6 +798,20 @@ function continueZoneEdit(event) {
     ? { minWidth: 0.08, maxWidth: 0.90, minHeight: 0.08, maxHeight: 0.70 }
     : { minWidth: 0.06, maxWidth: 0.70, minHeight: 0.06, maxHeight: 0.50 };
   resizeRegion(dragging.region, dragging, point, limits);
+}
+
+function boundaryCornerAt(point, boundary) {
+  const pointX = 1 - point.x;
+  const tolerance = Math.max(14, canvas.width * 0.022);
+  const corners = {
+    nw: [1 - boundary.left, boundary.top],
+    ne: [1 - boundary.right, boundary.top],
+    se: [1 - boundary.right, boundary.bottom],
+    sw: [1 - boundary.left, boundary.bottom],
+  };
+  return Object.entries(corners).find(([, [x, y]]) =>
+    Math.hypot((pointX - x) * canvas.width, (point.y - y) * canvas.height) <= tolerance,
+  )?.[0];
 }
 
 function endZoneEdit(event) {
@@ -725,7 +843,7 @@ function setEditingBoundary(editing) {
   boundaryEditButton.setAttribute('aria-pressed', String(editing));
   boundaryEditButton.textContent = editing ? 'Done editing rectangle' : 'Edit hit rectangle';
   layoutHelp.textContent = editing
-    ? 'Drag inside the rectangle to move the hit area. Drag any bounding-box handle to resize it.'
+    ? 'Drag inside the rectangle to move it. Drag a corner to resize it.'
     : layoutDirty ? 'Unsaved kit or hit-area changes. Save kit to keep them.' : 'Kit layout loaded.';
   requestRender();
 }
@@ -813,8 +931,10 @@ function initializeWorker() {
   visibleHits.clear();
   totalHits = 0;
   ignoredHits = 0;
+  detectedStrokes = 0;
+  missingTipStrokes = 0;
   lastPredictionComparison = '';
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0 · No fingertip 0';
   updatePredictionReadout();
   worker.postMessage({
     type: 'initialize',
@@ -910,7 +1030,10 @@ function stop() {
   lastPredictionComparison = '';
   visibleHits.clear();
   totalHits = 0;
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Hits 0 · Outside 0';
+  detectedStrokes = 0;
+  ignoredHits = 0;
+  missingTipStrokes = 0;
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0 · No fingertip 0';
   updatePredictionReadout();
   processedFps = 0;
   displayDelayMs = 0;
@@ -925,6 +1048,11 @@ function stop() {
 toggle.addEventListener('click', () => media ? stop() : start());
 delegateSelect.addEventListener('change', () => { if (worker && media) initializeWorker(); });
 responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; });
+for (const slider of [downThresholdSlider, minTravelSlider, impactDropSlider]) {
+  slider.addEventListener('input', updateDetectorSettings);
+}
+resetStrokeSettingsButton.addEventListener('click', resetDetectorSettings);
+initializeDetectorSettings();
 layoutEdit.addEventListener('click', () => setEditingLayout(!editingLayout));
 boundaryEditButton.addEventListener('click', () => setEditingBoundary(!editingBoundary));
 layoutSave.addEventListener('click', saveKitLayout);

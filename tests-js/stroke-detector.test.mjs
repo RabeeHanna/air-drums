@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { StrokeDetector, isWithinBoundary } from '../air_drums/static/stroke-detector.mjs';
+import { StrokeDetector } from '../air_drums/static/stroke-detector.mjs';
+import { isWithinBoundary } from '../air_drums/static/hit-boundary.mjs';
 
 function feed(detector, samples) {
   return samples.map(([time, y]) => detector.update({ x: 0.5, y, visibility: 1 }, time, 0.25, 4));
@@ -58,10 +59,10 @@ test('requires a completed minimum-travel downswing before reporting impact', ()
 });
 
 test('accepts points anywhere inside a rectangular hit boundary and rejects points outside either axis', () => {
-  const boundary = { x: 0.5, y: 0.55, width: 0.4, height: 0.2 };
-  assert.equal(isWithinBoundary({ x: 0.5, y: 0.65 }, boundary, 640, 480), true);
-  assert.equal(isWithinBoundary({ x: 0.5, y: 0.66 }, boundary, 640, 480), false);
+  const boundary = { left: 0.3, top: 0.45, right: 0.7, bottom: 0.65 };
+  assert.equal(isWithinBoundary({ x: 0.5, y: 0.65 }, boundary), true);
+  assert.equal(isWithinBoundary({ x: 0.5, y: 0.66 }, boundary), false);
   // The corners are included; an oval would reject this point.
-  assert.equal(isWithinBoundary({ x: 0.649, y: 0.65 }, boundary, 640, 480), true);
-  assert.equal(isWithinBoundary({ x: 0.95, y: 0.55 }, boundary, 640, 480), false);
+  assert.equal(isWithinBoundary({ x: 0.699, y: 0.649 }, boundary), true);
+  assert.equal(isWithinBoundary({ x: 0.95, y: 0.55 }, boundary), false);
 });

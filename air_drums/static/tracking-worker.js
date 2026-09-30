@@ -1,29 +1,50 @@
-import { FilesetResolver, PoseLandmarker } from '/assets/vendor/vision_bundle.mjs';
+import { FilesetResolver, HandLandmarker, PoseLandmarker } from '/assets/vendor/vision_bundle.mjs';
+import { mapIndexTips } from './hand-points.mjs';
 
 const WASM_PATH = new URL('/assets/vendor/wasm/', self.location.origin).href;
 const POSE_MODEL = '/assets/models/pose_landmarker_lite.task';
+const HAND_MODEL = '/assets/models/hand_landmarker.task';
 
 let generation = 0;
+let moduleInstance = 0;
 let delegate = 'CPU';
 let vision = null;
 let poseLandmarker = null;
+let handLandmarker = null;
 
 function closeTask() {
   poseLandmarker?.close();
+  handLandmarker?.close();
   poseLandmarker = null;
+  handLandmarker = null;
 }
 
 async function createTask(requestedDelegate) {
   // The app runs in an ES module worker, so it must use MediaPipe's matching
   // ES module WASM loader rather than the classic loader's global ModuleFactory.
   vision ??= await FilesetResolver.forVisionTasks(WASM_PATH, true);
-  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+  // The ES-module loader installs a one-shot global ModuleFactory. Give each
+  // task a unique module URL so loading it again is not suppressed by the
+  // browser module cache after the previous task consumes that factory.
+  const createFileset = () => ({
+    ...vision,
+    wasmLoaderPath: `${vision.wasmLoaderPath}?instance=${++moduleInstance}`,
+  });
+  poseLandmarker = await PoseLandmarker.createFromOptions(createFileset(), {
     baseOptions: { modelAssetPath: POSE_MODEL, delegate: requestedDelegate },
     runningMode: 'VIDEO',
     numPoses: 1,
     outputSegmentationMasks: false,
     minPoseDetectionConfidence: 0.45,
     minPosePresenceConfidence: 0.45,
+    minTrackingConfidence: 0.45,
+  });
+  handLandmarker = await HandLandmarker.createFromOptions(createFileset(), {
+    baseOptions: { modelAssetPath: HAND_MODEL, delegate: requestedDelegate },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.45,
+    minHandPresenceConfidence: 0.45,
     minTrackingConfidence: 0.45,
   });
 }
@@ -97,9 +118,17 @@ function serializePose(result) {
   };
 }
 
+function mergeHandTips(pose, handResult, width, height) {
+  const points = mapIndexTips(handResult, pose, width / height);
+  return {
+    leftIndex: points.leftIndex ? normalizedPoint(points.leftIndex) : null,
+    rightIndex: points.rightIndex ? normalizedPoint(points.rightIndex) : null,
+  };
+}
+
 async function processFrame(data) {
   const bitmap = data.bitmap;
-  if (data.generation !== generation || !poseLandmarker) {
+  if (data.generation !== generation || !poseLandmarker || !handLandmarker) {
     bitmap.close();
     return;
   }
@@ -107,8 +136,11 @@ async function processFrame(data) {
   try {
     const started = performance.now();
     let pose;
+    let hands;
     try {
-      pose = serializePose(poseLandmarker.detectForVideo(bitmap, data.timestampMs));
+      const poseResult = poseLandmarker.detectForVideo(bitmap, data.timestampMs);
+      pose = serializePose(poseResult);
+      hands = handLandmarker.detectForVideo(bitmap, data.timestampMs);
     } catch (gpuError) {
       if (delegate !== 'GPU') throw gpuError;
       closeTask();
@@ -120,14 +152,17 @@ async function processFrame(data) {
         delegate,
         reason: String(gpuError?.message || gpuError).slice(0, 180),
       });
-      pose = serializePose(poseLandmarker.detectForVideo(bitmap, data.timestampMs));
+      const poseResult = poseLandmarker.detectForVideo(bitmap, data.timestampMs);
+      pose = serializePose(poseResult);
+      hands = handLandmarker.detectForVideo(bitmap, data.timestampMs);
     }
+    const handTips = mergeHandTips(pose, hands, bitmap.width, bitmap.height);
     self.postMessage({
       type: 'result',
       generation,
       timestampMs: data.timestampMs,
       delegate,
-      pose,
+      pose: { ...pose, ...handTips },
       inference: { totalMs: performance.now() - started },
     });
   } catch (error) {

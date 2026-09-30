@@ -44,23 +44,21 @@ class KitLayoutTests(unittest.TestCase):
             self.assertAlmostEqual(migrated["zones"][0]["height"], 0.14)
             self.assertEqual(load_layout(path), migrated)
 
-    def test_strike_boundary_is_saved_and_validated(self):
+    def test_strike_rectangle_is_saved_and_validated(self):
         layout = default_layout()
-        layout["strikeBoundary"] = {"x": 0.41, "y": 0.62, "width": 0.62, "height": 0.434}
+        layout["strikeBoundary"] = {"left": 0.1, "top": 0.2, "right": 0.72, "bottom": 0.8}
         self.assertEqual(validate_layout(layout)["strikeBoundary"], layout["strikeBoundary"])
-        layout["strikeBoundary"]["width"] = 0.91
+        layout["strikeBoundary"]["right"] = 1.1
         with self.assertRaises(LayoutValidationError):
             validate_layout(layout)
 
-    def test_legacy_boundary_circle_migrates_to_editable_oval(self):
+    def test_legacy_boundary_migrates_to_fresh_rectangle(self):
         layout = default_layout()
         layout["version"] = 3
         layout["strikeBoundary"] = {"x": 0.41, "y": 0.62, "radius": 0.31}
         migrated = validate_layout(layout)
-        self.assertEqual(migrated["version"], 4)
-        self.assertEqual(migrated["strikeBoundary"], {
-            "x": 0.41, "y": 0.62, "width": 0.62, "height": 0.434,
-        })
+        self.assertEqual(migrated["version"], 5)
+        self.assertEqual(migrated["strikeBoundary"], default_layout()["strikeBoundary"])
 
     def test_unknown_zone_is_rejected(self):
         layout = default_layout()

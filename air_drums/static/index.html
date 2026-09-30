@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101313">
-    <title>Air Drummer · Target Prediction</title>
+    <title>Air Drummer · Fingertip tracking</title>
     <style>
       :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101313; color: #eff4ef; }
       * { box-sizing: border-box; }
@@ -32,6 +32,11 @@
       #predictionReadout { color: #b9f0e7; font: 600 .78rem/1.5 ui-monospace, monospace; max-width: 920px; }
       .controls { display: flex; flex-wrap: wrap; align-items: end; gap: .8rem 1.1rem; padding: .9rem 1rem; background: #171c19; border-top: 1px solid #2d3831; }
       .control { display: grid; gap: .3rem; color: #aebdb2; font-size: .78rem; }
+      .calibration { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: .85rem 1.2rem; padding: 1rem; background: #131815; border-top: 1px solid #2d3831; }
+      .calibration-heading { grid-column: 1 / -1; margin: 0; color: #e4eee6; font-size: .92rem; }
+      .calibration .control { gap: .4rem; }
+      .calibration input[type="range"] { width: 100%; accent-color: #9de9b3; }
+      .calibration-help { grid-column: 1 / -1; margin: 0; color: #93a197; font-size: .76rem; }
       select { min-width: 195px; border: 1px solid #3a463e; border-radius: 8px; padding: .55rem .7rem; background: #101613; color: #eff4ef; font: inherit; }
       .check { display: flex; align-items: center; gap: .45rem; color: #c7d4ca; font-size: .82rem; padding-bottom: .55rem; }
       .check input { accent-color: #9de9b3; }
@@ -56,7 +61,7 @@
   <body>
     <main>
       <header>
-        <div><p class="eyebrow">Milestone 4 · Target prediction</p><h1>Air Drummer</h1></div>
+        <div><p class="eyebrow">Milestone 5 · Fingertip hit point</p><h1>Air Drummer</h1></div>
         <div class="metrics" id="metrics">Camera: — · Processed: — · Inference: — · Frame delay: —</div>
       </header>
       <section class="stage" aria-label="Webcam tracking preview">
@@ -99,15 +104,30 @@
             </select>
           </label>
         </div>
+        <section class="calibration" aria-labelledby="calibrationHeading">
+          <h2 class="calibration-heading" id="calibrationHeading">Stroke calibration</h2>
+          <label class="control" for="downThreshold">Downward speed threshold <span id="downThresholdValue">0.55</span>
+            <input id="downThreshold" type="range" min="0.20" max="1.50" step="0.05" value="0.55">
+          </label>
+          <label class="control" for="minTravel">Minimum wrist travel <span id="minTravelValue">0.050</span>
+            <input id="minTravel" type="range" min="0.015" max="0.120" step="0.005" value="0.050">
+          </label>
+          <label class="control" for="impactDrop">Impact turn sensitivity <span id="impactDropValue">0.62</span>
+            <input id="impactDrop" type="range" min="0.35" max="0.90" step="0.01" value="0.62">
+          </label>
+          <button class="secondary" id="resetStrokeSettings" type="button">Reset stroke settings</button>
+          <p class="calibration-help">Lower speed and travel thresholds count gentler strokes. Higher impact sensitivity detects the turnaround sooner. Changes apply immediately and are saved in this browser. These controls tune wrist stroke detection; the hit rectangle still decides whether the fingertip hit is accepted.</p>
+        </section>
       </section>
       <div class="legend" aria-label="Marker legend">
         <span><i class="swatch" style="background:#61aaff"></i>Pose shoulder</span>
         <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
+        <span><i class="swatch" style="background:#ff9e64"></i>Index fingertip</span>
         <span><i class="swatch" style="background:#55e8e0"></i>120 ms estimate</span>
         <span><i class="swatch" style="background:#ff80d5"></i>Impact-turn estimate</span>
       </div>
-      <p class="hint">Move your wrists down and let them rebound. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the outlined rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. Select <strong>Edit hit rectangle</strong> to adjust the accepted-hit area. Camera frames and per-frame landmarks are not recorded.</p>
+      <p class="hint">Move your wrists down and let them rebound. The orange markers show Hand Landmarker’s estimated index-finger tips; wrist motion still times each stroke. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the outlined rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. Select <strong>Edit hit rectangle</strong> to adjust the accepted-hit area. Camera frames and per-frame landmarks are not recorded.</p>
       <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
       <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>
