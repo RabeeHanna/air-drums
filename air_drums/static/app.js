@@ -1,7 +1,8 @@
 import { StrokeDetector } from './stroke-detector.mjs';
 import { isWithinBoundary, moveBoundary, resizeBoundary } from './hit-boundary.mjs';
 import { comparePredictions, TargetPredictor } from './target-predictor.mjs';
-import { indexFingertip } from './hit-point.mjs';
+import { estimateHandPoint } from './pose-hand-point.mjs';
+import { LocalAudioPlayer } from './local-audio.mjs';
 
 const video = document.querySelector('#video');
 const canvas = document.querySelector('#overlay');
@@ -23,6 +24,14 @@ const impactDropSlider = document.querySelector('#impactDrop');
 const impactDropValue = document.querySelector('#impactDropValue');
 const resetStrokeSettingsButton = document.querySelector('#resetStrokeSettings');
 const showRaw = document.querySelector('#showRaw');
+const showHandEstimate = document.querySelector('#showHandEstimate');
+const handExtensionSlider = document.querySelector('#handExtension');
+const handExtensionValue = document.querySelector('#handExtensionValue');
+const inferenceSizeSelect = document.querySelector('#inferenceSize');
+const audioEnabled = document.querySelector('#audioEnabled');
+const audioVolumeSlider = document.querySelector('#audioVolume');
+const audioVolumeValue = document.querySelector('#audioVolumeValue');
+const audioStatus = document.querySelector('#audioStatus');
 const delegateNote = document.querySelector('#delegateNote');
 const view = document.querySelector('#view');
 const layoutEdit = document.querySelector('#layoutEdit');
@@ -32,8 +41,7 @@ const layoutHelp = document.querySelector('#layoutHelp');
 const zoneSelect = document.querySelector('#zoneSelect');
 const boundaryEditButton = document.querySelector('#boundaryEdit');
 
-const POSE_CONNECTIONS = [[11, 13], [13, 15], [12, 14], [14, 16], [11, 12]];
-const POSE_COLORS = { shoulder: '#61aaff', elbow: '#43e0b5', wrist: '#f5cb5c', fingertip: '#ff9e64' };
+const POSE_COLORS = { wrist: '#f5cb5c', handEstimate: '#ff9e64' };
 const DETECTOR_DEFAULTS = { downThreshold: 0.55, minTravel: 0.05, impactDrop: 0.62 };
 const DETECTOR_LIMITS = { downThreshold: [0.2, 1.5], minTravel: [0.015, 0.12], impactDrop: [0.35, 0.9] };
 
@@ -51,6 +59,7 @@ function loadDetectorSettings() {
 }
 
 const detectorSettings = loadDetectorSettings();
+const audioPlayer = new LocalAudioPlayer(message => { audioStatus.textContent = message; });
 
 let media = null;
 let worker = null;
@@ -88,7 +97,6 @@ const visibleHits = new Map();
 let totalHits = 0;
 let ignoredHits = 0;
 let detectedStrokes = 0;
-let missingTipStrokes = 0;
 let lastPredictionComparison = '';
 let strokeSessionId = null;
 let strokeWriteQueue = Promise.resolve();
@@ -161,8 +169,8 @@ class OneEuroPoint {
 
 function smooth(key, point, timestampMs) {
   if (!point) return null;
-  const isFastPoint = key.endsWith('Wrist') || key.endsWith('Index');
-  const tuning = isFastPoint
+  const isWrist = key.endsWith('Wrist');
+  const tuning = isWrist
     ? { minCutoff: 0.7, beta: response => 0.005 + response * 0.22 }
     : { minCutoff: 0.45, beta: response => 0.02 + response * 0.07 };
   let filter = filters.get(key);
@@ -211,44 +219,26 @@ function drawDot(point, label, color, width, height, radius = 8) {
   }
 }
 
-function drawConnections(points, connections, width, height) {
-  ctx.beginPath();
-  for (const [from, to] of connections) {
-    const start = points[from];
-    const end = points[to];
-    if (!start || !end || start.visibility < 0.18 || end.visibility < 0.18) continue;
-    ctx.moveTo(start.x * width, start.y * height);
-    ctx.lineTo(end.x * width, end.y * height);
-  }
-  ctx.strokeStyle = '#e2bd5d99';
-  ctx.lineWidth = Math.max(4, width * 0.0026);
-  ctx.lineCap = 'round';
-  ctx.stroke();
-}
-
 function drawPose(rawPose, filteredPose, width, height) {
   if (!filteredPose) return;
-  const points = new Array(17);
-  points[11] = filteredPose.leftShoulder;
-  points[12] = filteredPose.rightShoulder;
-  points[13] = filteredPose.leftElbow;
-  points[14] = filteredPose.rightElbow;
-  points[15] = filteredPose.leftWrist;
-  points[16] = filteredPose.rightWrist;
-  drawConnections(points, POSE_CONNECTIONS, width, height);
-  const joints = [
-    ['leftShoulder', 'L shoulder', POSE_COLORS.shoulder],
-    ['rightShoulder', 'R shoulder', POSE_COLORS.shoulder],
-    ['leftElbow', 'L elbow', POSE_COLORS.elbow],
-    ['rightElbow', 'R elbow', POSE_COLORS.elbow],
-    ['leftWrist', 'L wrist', POSE_COLORS.wrist],
-    ['rightWrist', 'R wrist', POSE_COLORS.wrist],
-    ['leftIndex', 'L index', POSE_COLORS.fingertip],
-    ['rightIndex', 'R index', POSE_COLORS.fingertip],
-  ];
-  for (const [key, label, color] of joints) {
-    if (showRaw.checked) drawDot(rawPose?.[key], '', '#ffffff99', width, height, 4);
-    drawDot(filteredPose[key], label, color, width, height, 8);
+  const aspectRatio = width / height;
+  const extension = Number(handExtensionSlider.value) / 100;
+  for (const hand of ['left', 'right']) {
+    const wrist = filteredPose[`${hand}Wrist`];
+    if (!wrist) continue;
+    if (showRaw.checked) drawDot(rawPose?.[`${hand}Wrist`], '', '#ffffff99', width, height, 4);
+    drawDot(wrist, '', POSE_COLORS.wrist, width, height, 6);
+    if (!showHandEstimate.checked) continue;
+    const endpoint = estimateHandPoint(filteredPose, hand, extension, aspectRatio);
+    if (!endpoint) continue;
+    ctx.beginPath();
+    ctx.moveTo(wrist.x * width, wrist.y * height);
+    ctx.lineTo(endpoint.x * width, endpoint.y * height);
+    ctx.strokeStyle = '#ff9e64cc';
+    ctx.lineWidth = Math.max(3, width * 0.0035);
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    drawDot(endpoint, `${hand === 'left' ? 'L' : 'R'} hit point`, POSE_COLORS.handEstimate, width, height, 7);
   }
 }
 
@@ -313,17 +303,21 @@ function detectStrokes(pose, timestampMs) {
       peakDownSpeed: detector.peakDownSpeed,
       impactDrop: detector.impactDrop,
     });
-    const fingertip = indexFingertip(currentResult?.filteredPose, hand);
-    const fingertipValid = Boolean(fingertip);
-    const prediction = result.event ? wristPrediction : wristPrediction && fingertipValid ? {
+    const estimatedPoint = estimateHandPoint(
+      currentResult?.filteredPose,
+      hand,
+      Number(handExtensionSlider.value) / 100,
+      aspectRatio,
+    );
+    const prediction = result.event ? wristPrediction : wristPrediction && estimatedPoint ? {
       ...wristPrediction,
-      fixed: wristPrediction.fixed ? { ...wristPrediction.fixed, x: wristPrediction.fixed.x + fingertip.x - point.x, y: wristPrediction.fixed.y + fingertip.y - point.y } : null,
-      deceleration: wristPrediction.deceleration ? { ...wristPrediction.deceleration, x: wristPrediction.deceleration.x + fingertip.x - point.x, y: wristPrediction.deceleration.y + fingertip.y - point.y } : null,
+      fixed: wristPrediction.fixed ? { ...wristPrediction.fixed, x: wristPrediction.fixed.x + estimatedPoint.x - point.x, y: wristPrediction.fixed.y + estimatedPoint.y - point.y } : null,
+      deceleration: wristPrediction.deceleration ? { ...wristPrediction.deceleration, x: wristPrediction.deceleration.x + estimatedPoint.x - point.x, y: wristPrediction.deceleration.y + estimatedPoint.y - point.y } : null,
     } : null;
     if (!result.event) predictor.predictions = prediction;
     if (result.event) {
       detectedStrokes += 1;
-      const hitPoint = fingertipValid ? fingertip : null;
+      const hitPoint = estimatedPoint;
       result.event.x = hitPoint?.x ?? null;
       result.event.y = hitPoint?.y ?? null;
       result.event.insideHitArea = hitPoint ? isInsideStrikeBoundary(hitPoint) : false;
@@ -345,11 +339,11 @@ function detectStrokes(pose, timestampMs) {
       lastPredictionComparison = `${hand === 'left' ? 'L' : 'R'} impact · ${modelSummaries.join(' · ')}`;
       if (result.event.insideHitArea) {
         totalHits += 1;
+        audioPlayer.play(result.event.actualZoneId);
         visibleHits.set(hand, { point: { x: hitPoint.x, y: hitPoint.y }, until: performance.now() + 280 });
         requestRender();
       } else {
         ignoredHits += 1;
-        if (!hitPoint) missingTipStrokes += 1;
       }
       logStroke(result.event);
       predictor.reset();
@@ -358,7 +352,7 @@ function detectStrokes(pose, timestampMs) {
     }
   }
   updatePredictionReadout();
-  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Detected ${detectedStrokes} · Hits ${totalHits} · Outside ${ignoredHits - missingTipStrokes} · No fingertip ${missingTipStrokes}`;
+  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Detected ${detectedStrokes} · Hits ${totalHits} · Outside ${ignoredHits}`;
 }
 
 function updateDetectorSettings() {
@@ -386,6 +380,27 @@ function initializeDetectorSettings() {
 function resetDetectorSettings() {
   Object.assign(detectorSettings, DETECTOR_DEFAULTS);
   initializeDetectorSettings();
+}
+
+function loadVisualSettings() {
+  try {
+    const inferenceWidth = localStorage.getItem('airDrums.inferenceWidth');
+    if (['480', '640'].includes(inferenceWidth)) inferenceSizeSelect.value = inferenceWidth;
+    const storedExtension = localStorage.getItem('airDrums.handExtension');
+    const extension = Number(storedExtension);
+    if (storedExtension !== null && Number.isFinite(extension)) {
+      handExtensionSlider.value = Math.max(0, Math.min(70, extension));
+    }
+    showHandEstimate.checked = localStorage.getItem('airDrums.showHandEstimate') !== 'false';
+  } catch {
+    // Keep the built-in defaults when browser storage is unavailable.
+  }
+  updateHandExtensionLabel();
+}
+
+function updateHandExtensionLabel() {
+  handExtensionValue.textContent = `${(Number(handExtensionSlider.value) / 100).toFixed(2)}× shoulder width`;
+  requestRender();
 }
 
 function updatePredictionReadout() {
@@ -465,7 +480,7 @@ function drawKitLayout(width, height) {
 }
 
 function drawStrikeBoundary(width, height) {
-  if (!kitLayout?.strikeBoundary) return;
+  if (!editingBoundary || !kitLayout?.strikeBoundary) return;
   const boundary = kitLayout.strikeBoundary;
   const left = boundary.left * width;
   const top = boundary.top * height;
@@ -477,12 +492,12 @@ function drawStrikeBoundary(width, height) {
   ctx.beginPath();
   ctx.rect(left, top, right - left, bottom - top);
   ctx.fillStyle = '#ffffff';
-  ctx.globalAlpha = editingBoundary ? 0.08 : 0.035;
+  ctx.globalAlpha = 0.08;
   ctx.fill();
   ctx.globalAlpha = 1;
-  ctx.lineWidth = editingBoundary ? 4 : 3;
-  ctx.setLineDash(editingBoundary ? [12, 7] : [8, 7]);
-  ctx.strokeStyle = editingBoundary ? '#ffffff' : '#fff2b8';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([12, 7]);
+  ctx.strokeStyle = '#ffffff';
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.font = `700 ${Math.max(12, width * 0.016)}px system-ui`;
@@ -538,7 +553,7 @@ function drawTargetPredictions(width, height) {
       if (!prediction) continue;
       const x = prediction.x * width;
       const y = prediction.y * height;
-      const wrist = currentResult?.filteredPose?.[`${hand}Index`];
+      const wrist = currentResult?.filteredPose?.[`${hand}Wrist`];
       ctx.save();
       ctx.beginPath();
       ctx.moveTo((wrist?.x ?? prediction.x) * width, (wrist?.y ?? prediction.y) * height);
@@ -869,7 +884,8 @@ async function saveKitLayout() {
 
 function updateMetrics() {
   const details = currentInference ? `${currentInference.totalMs.toFixed(0)} ms` : '—';
-  metrics.textContent = `Camera: ${cameraDescription} · Processed: ${processedFps.toFixed(1)} FPS · Inference: ${details} · Frame delay: ${displayDelayMs ? `${displayDelayMs.toFixed(0)} ms` : '—'}`;
+  const input = currentInference ? `${currentInference.width}×${currentInference.height}` : '—';
+  metrics.textContent = `Camera: ${cameraDescription} · Input: ${input} · Processed: ${processedFps.toFixed(1)} FPS · Inference: ${details} · Frame delay: ${displayDelayMs ? `${displayDelayMs.toFixed(0)} ms` : '—'}`;
 }
 
 function handleWorkerMessage(event) {
@@ -932,9 +948,8 @@ function initializeWorker() {
   totalHits = 0;
   ignoredHits = 0;
   detectedStrokes = 0;
-  missingTipStrokes = 0;
   lastPredictionComparison = '';
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0 · No fingertip 0';
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0';
   updatePredictionReadout();
   worker.postMessage({
     type: 'initialize',
@@ -951,7 +966,7 @@ async function frameLoop(now, metadata) {
     inFlightGeneration = generation;
     sentAt = performance.now();
     try {
-      const bitmap = await createImageBitmap(video);
+      const bitmap = await createInferenceBitmap();
       if (!media || !worker || !workerReady) bitmap.close();
       else worker.postMessage({
         type: 'frame',
@@ -967,6 +982,20 @@ async function frameLoop(now, metadata) {
   scheduleFrameLoop();
 }
 
+async function createInferenceBitmap() {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  const maxWidth = Number(inferenceSizeSelect.value);
+  const maxHeight = maxWidth * 0.75;
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+  if (scale >= 0.999) return createImageBitmap(video);
+  return createImageBitmap(video, {
+    resizeWidth: Math.max(1, Math.round(sourceWidth * scale)),
+    resizeHeight: Math.max(1, Math.round(sourceHeight * scale)),
+    resizeQuality: 'low',
+  });
+}
+
 function scheduleFrameLoop() {
   if (video.requestVideoFrameCallback) {
     callbackKind = 'video';
@@ -978,6 +1007,8 @@ function scheduleFrameLoop() {
 }
 
 async function start() {
+  audioPlayer.enabled = audioEnabled.checked;
+  if (audioPlayer.enabled) audioPlayer.activate();
   toggle.disabled = true;
   setStatus('Requesting camera access…');
   try {
@@ -1032,14 +1063,13 @@ function stop() {
   totalHits = 0;
   detectedStrokes = 0;
   ignoredHits = 0;
-  missingTipStrokes = 0;
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0 · No fingertip 0';
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0';
   updatePredictionReadout();
   processedFps = 0;
   displayDelayMs = 0;
   cameraDescription = '—';
   resultCount = 0;
-  metrics.textContent = 'Camera: — · Processed: — · Inference: — · Frame delay: —';
+  metrics.textContent = 'Camera: — · Input: — · Processed: — · Inference: — · Frame delay: —';
   toggle.textContent = 'Start camera';
   toggle.disabled = false;
   setStatus('Camera is off');
@@ -1048,11 +1078,35 @@ function stop() {
 toggle.addEventListener('click', () => media ? stop() : start());
 delegateSelect.addEventListener('change', () => { if (worker && media) initializeWorker(); });
 responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; });
+audioEnabled.addEventListener('change', () => {
+  audioPlayer.enabled = audioEnabled.checked;
+  if (audioPlayer.enabled) audioPlayer.activate();
+});
+audioVolumeSlider.addEventListener('input', () => {
+  const volume = Number(audioVolumeSlider.value) / 100;
+  audioPlayer.setVolume(volume);
+  audioVolumeValue.textContent = `${audioVolumeSlider.value}%`;
+});
 for (const slider of [downThresholdSlider, minTravelSlider, impactDropSlider]) {
   slider.addEventListener('input', updateDetectorSettings);
 }
 resetStrokeSettingsButton.addEventListener('click', resetDetectorSettings);
 initializeDetectorSettings();
+audioPlayer.enabled = audioEnabled.checked;
+audioPlayer.setVolume(Number(audioVolumeSlider.value) / 100);
+audioPlayer.prepare();
+loadVisualSettings();
+handExtensionSlider.addEventListener('input', () => {
+  try { localStorage.setItem('airDrums.handExtension', handExtensionSlider.value); } catch { /* optional */ }
+  updateHandExtensionLabel();
+});
+showHandEstimate.addEventListener('change', () => {
+  try { localStorage.setItem('airDrums.showHandEstimate', String(showHandEstimate.checked)); } catch { /* optional */ }
+  requestRender();
+});
+inferenceSizeSelect.addEventListener('change', () => {
+  try { localStorage.setItem('airDrums.inferenceWidth', inferenceSizeSelect.value); } catch { /* optional */ }
+});
 layoutEdit.addEventListener('click', () => setEditingLayout(!editingLayout));
 boundaryEditButton.addEventListener('click', () => setEditingBoundary(!editingBoundary));
 layoutSave.addEventListener('click', saveKitLayout);

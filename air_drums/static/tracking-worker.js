@@ -1,22 +1,17 @@
-import { FilesetResolver, HandLandmarker, PoseLandmarker } from '/assets/vendor/vision_bundle.mjs';
-import { mapIndexTips } from './hand-points.mjs';
+import { FilesetResolver, PoseLandmarker } from '/assets/vendor/vision_bundle.mjs';
 
 const WASM_PATH = new URL('/assets/vendor/wasm/', self.location.origin).href;
 const POSE_MODEL = '/assets/models/pose_landmarker_lite.task';
-const HAND_MODEL = '/assets/models/hand_landmarker.task';
 
 let generation = 0;
 let moduleInstance = 0;
 let delegate = 'CPU';
 let vision = null;
 let poseLandmarker = null;
-let handLandmarker = null;
 
 function closeTask() {
   poseLandmarker?.close();
-  handLandmarker?.close();
   poseLandmarker = null;
-  handLandmarker = null;
 }
 
 async function createTask(requestedDelegate) {
@@ -37,14 +32,6 @@ async function createTask(requestedDelegate) {
     outputSegmentationMasks: false,
     minPoseDetectionConfidence: 0.45,
     minPosePresenceConfidence: 0.45,
-    minTrackingConfidence: 0.45,
-  });
-  handLandmarker = await HandLandmarker.createFromOptions(createFileset(), {
-    baseOptions: { modelAssetPath: HAND_MODEL, delegate: requestedDelegate },
-    runningMode: 'VIDEO',
-    numHands: 2,
-    minHandDetectionConfidence: 0.45,
-    minHandPresenceConfidence: 0.45,
     minTrackingConfidence: 0.45,
   });
 }
@@ -118,17 +105,9 @@ function serializePose(result) {
   };
 }
 
-function mergeHandTips(pose, handResult, width, height) {
-  const points = mapIndexTips(handResult, pose, width / height);
-  return {
-    leftIndex: points.leftIndex ? normalizedPoint(points.leftIndex) : null,
-    rightIndex: points.rightIndex ? normalizedPoint(points.rightIndex) : null,
-  };
-}
-
 async function processFrame(data) {
   const bitmap = data.bitmap;
-  if (data.generation !== generation || !poseLandmarker || !handLandmarker) {
+  if (data.generation !== generation || !poseLandmarker) {
     bitmap.close();
     return;
   }
@@ -136,11 +115,9 @@ async function processFrame(data) {
   try {
     const started = performance.now();
     let pose;
-    let hands;
     try {
       const poseResult = poseLandmarker.detectForVideo(bitmap, data.timestampMs);
       pose = serializePose(poseResult);
-      hands = handLandmarker.detectForVideo(bitmap, data.timestampMs);
     } catch (gpuError) {
       if (delegate !== 'GPU') throw gpuError;
       closeTask();
@@ -154,16 +131,14 @@ async function processFrame(data) {
       });
       const poseResult = poseLandmarker.detectForVideo(bitmap, data.timestampMs);
       pose = serializePose(poseResult);
-      hands = handLandmarker.detectForVideo(bitmap, data.timestampMs);
     }
-    const handTips = mergeHandTips(pose, hands, bitmap.width, bitmap.height);
     self.postMessage({
       type: 'result',
       generation,
       timestampMs: data.timestampMs,
       delegate,
-      pose: { ...pose, ...handTips },
-      inference: { totalMs: performance.now() - started },
+      pose,
+      inference: { totalMs: performance.now() - started, width: bitmap.width, height: bitmap.height },
     });
   } catch (error) {
     self.postMessage({

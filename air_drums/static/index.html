@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101313">
-    <title>Air Drummer · Fingertip tracking</title>
+    <title>Air Drummer · Pose tracking</title>
     <style>
       :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101313; color: #eff4ef; }
       * { box-sizing: border-box; }
@@ -61,7 +61,7 @@
   <body>
     <main>
       <header>
-        <div><p class="eyebrow">Milestone 5 · Fingertip hit point</p><h1>Air Drummer</h1></div>
+        <div><p class="eyebrow">Milestone 5 · Estimated hand point</p><h1>Air Drummer</h1></div>
         <div class="metrics" id="metrics">Camera: — · Processed: — · Inference: — · Frame delay: —</div>
       </header>
       <section class="stage" aria-label="Webcam tracking preview">
@@ -88,7 +88,21 @@
           <label class="control" for="responsiveness">Motion response <span id="responseValue">55%</span>
             <input id="responsiveness" type="range" min="0" max="100" value="55">
           </label>
+          <label class="control" for="inferenceSize">Processing resolution
+            <select id="inferenceSize">
+              <option value="640" selected>Standard · up to 640×480</option>
+              <option value="480">Performance · up to 480×360</option>
+            </select>
+          </label>
+          <label class="check"><input id="showHandEstimate" type="checkbox" checked> Show estimated hand point</label>
+          <label class="control" for="handExtension">Estimated hand length <span id="handExtensionValue">0.35× shoulder width</span>
+            <input id="handExtension" type="range" min="0" max="70" step="5" value="35">
+          </label>
           <label class="check"><input id="showRaw" type="checkbox"> Show raw pose points</label>
+          <label class="check"><input id="audioEnabled" type="checkbox" checked> Audio hits</label>
+          <label class="control" for="audioVolume">Audio volume <span id="audioVolumeValue">72%</span>
+            <input id="audioVolume" type="range" min="0" max="100" value="72">
+          </label>
           <div class="layout-actions">
             <button class="secondary" id="layoutEdit" type="button" aria-pressed="false">Edit layout</button>
             <button class="secondary" id="boundaryEdit" type="button" aria-pressed="false">Edit hit rectangle</button>
@@ -116,19 +130,18 @@
             <input id="impactDrop" type="range" min="0.35" max="0.90" step="0.01" value="0.62">
           </label>
           <button class="secondary" id="resetStrokeSettings" type="button">Reset stroke settings</button>
-          <p class="calibration-help">Lower speed and travel thresholds count gentler strokes. Higher impact sensitivity detects the turnaround sooner. Changes apply immediately and are saved in this browser. These controls tune wrist stroke detection; the hit rectangle still decides whether the fingertip hit is accepted.</p>
+          <p class="calibration-help">Lower speed and travel thresholds count gentler strokes. Higher impact sensitivity detects the turnaround sooner. Changes apply immediately and are saved in this browser. These controls tune wrist stroke detection; the hit rectangle still decides whether the estimated hand point is accepted.</p>
         </section>
       </section>
       <div class="legend" aria-label="Marker legend">
-        <span><i class="swatch" style="background:#61aaff"></i>Pose shoulder</span>
-        <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
-        <span><i class="swatch" style="background:#ff9e64"></i>Index fingertip</span>
+        <span><i class="swatch" style="background:#ff9e64"></i>Estimated hand point</span>
         <span><i class="swatch" style="background:#55e8e0"></i>120 ms estimate</span>
         <span><i class="swatch" style="background:#ff80d5"></i>Impact-turn estimate</span>
       </div>
-      <p class="hint">Move your wrists down and let them rebound. The orange markers show Hand Landmarker’s estimated index-finger tips; wrist motion still times each stroke. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the outlined rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. Select <strong>Edit hit rectangle</strong> to adjust the accepted-hit area. Camera frames and per-frame landmarks are not recorded.</p>
+      <p class="hint">Move your wrists down and let them rebound. The orange marker extends from the Pose wrist along the forearm direction to estimate the hand end; adjust its length or hide it with <strong>Show estimated hand point</strong>. This rough estimate uses one tracking model and does not follow wrist flexion. Choose a lower processing resolution to reduce vision work while leaving the camera preview at its negotiated size. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the hit rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. The rectangle is visible only while editing. Camera frames and per-frame landmarks are not recorded.</p>
       <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
+      <p class="note" id="audioStatus" role="status" aria-live="polite">Preparing local drum sounds…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>
       <p class="note">Camera frames stay in this browser and are not sent to Google. MediaPipe may send performance telemetry.</p>
     </main>
