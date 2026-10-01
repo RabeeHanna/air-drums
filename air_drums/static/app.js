@@ -3,6 +3,7 @@ import { isWithinBoundary, moveBoundary, resizeBoundary } from './hit-boundary.m
 import { comparePredictions, TargetPredictor } from './target-predictor.mjs';
 import { estimateHandPoint } from './pose-hand-point.mjs';
 import { LocalAudioPlayer } from './local-audio.mjs';
+import { CandidateObserver } from './candidate-observer.mjs';
 
 const video = document.querySelector('#video');
 const canvas = document.querySelector('#overlay');
@@ -16,13 +17,16 @@ const empty = document.querySelector('#empty');
 const delegateSelect = document.querySelector('#delegate');
 const responseSlider = document.querySelector('#responsiveness');
 const responseValue = document.querySelector('#responseValue');
-const downThresholdSlider = document.querySelector('#downThreshold');
-const downThresholdValue = document.querySelector('#downThresholdValue');
-const minTravelSlider = document.querySelector('#minTravel');
-const minTravelValue = document.querySelector('#minTravelValue');
-const impactDropSlider = document.querySelector('#impactDrop');
-const impactDropValue = document.querySelector('#impactDropValue');
+const detectorControls = Object.fromEntries(['left', 'right'].map(hand => {
+  const prefix = hand === 'left' ? 'left' : 'right';
+  return [hand, {
+    downThreshold: { slider: document.querySelector(`#${prefix}DownThreshold`), value: document.querySelector(`#${prefix}DownThresholdValue`) },
+    minTravel: { slider: document.querySelector(`#${prefix}MinTravel`), value: document.querySelector(`#${prefix}MinTravelValue`) },
+    impactDrop: { slider: document.querySelector(`#${prefix}ImpactDrop`), value: document.querySelector(`#${prefix}ImpactDropValue`) },
+  }];
+}));
 const resetStrokeSettingsButton = document.querySelector('#resetStrokeSettings');
+const restrictHitsToZones = document.querySelector('#restrictHitsToZones');
 const showRaw = document.querySelector('#showRaw');
 const showHandEstimate = document.querySelector('#showHandEstimate');
 const handExtensionSlider = document.querySelector('#handExtension');
@@ -40,25 +44,58 @@ const layoutReset = document.querySelector('#layoutReset');
 const layoutHelp = document.querySelector('#layoutHelp');
 const zoneSelect = document.querySelector('#zoneSelect');
 const boundaryEditButton = document.querySelector('#boundaryEdit');
+const calibrationZoneSelect = document.querySelector('#calibrationZone');
+const calibrationHandSelect = document.querySelector('#calibrationHand');
+const promptTrialButton = document.querySelector('#promptTrial');
+const markMissedButton = document.querySelector('#markMissed');
+const markTrackingLossButton = document.querySelector('#markTrackingLoss');
+const cancelTrialButton = document.querySelector('#cancelTrial');
+const calibrationStatus = document.querySelector('#calibrationStatus');
+const calibrationSummary = document.querySelector('#calibrationSummary');
+const autoAdjustToggle = document.querySelector('#autoAdjust');
+const adjustmentReadout = document.querySelector('#adjustmentReadout');
+const revertAdjustmentButton = document.querySelector('#revertAdjustment');
+const markFalseHitButton = document.querySelector('#markFalseHit');
 
-const POSE_COLORS = { wrist: '#f5cb5c', handEstimate: '#ff9e64' };
+const POSE_COLORS = { elbow: '#43e0b5', wrist: '#f5cb5c', handEstimate: '#ff9e64' };
 const DETECTOR_DEFAULTS = { downThreshold: 0.55, minTravel: 0.05, impactDrop: 0.62 };
 const DETECTOR_LIMITS = { downThreshold: [0.2, 1.5], minTravel: [0.015, 0.12], impactDrop: [0.35, 0.9] };
 
+function loadAppSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('airDrums.appSettings') || '{}');
+    return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+const appSettings = loadAppSettings();
+
 function loadDetectorSettings() {
   try {
-    const saved = JSON.parse(localStorage.getItem('airDrums.strokeSettings') || '{}');
-    return Object.fromEntries(Object.entries(DETECTOR_DEFAULTS).map(([key, fallback]) => {
-      const [minimum, maximum] = DETECTOR_LIMITS[key];
-      const value = Number(saved[key]);
-      return [key, Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback];
+    const saved = appSettings.strokeSettings ?? JSON.parse(localStorage.getItem('airDrums.strokeSettings') || '{}');
+    return Object.fromEntries(['left', 'right'].map(hand => {
+      // Upgrade the previous shared setting format by copying it to each hand.
+      const source = saved[hand] && typeof saved[hand] === 'object' ? saved[hand] : saved;
+      const settings = Object.fromEntries(Object.entries(DETECTOR_DEFAULTS).map(([key, fallback]) => {
+        const [minimum, maximum] = DETECTOR_LIMITS[key];
+        const value = Number(source[key]);
+        return [key, Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback];
+      }));
+      return [hand, settings];
     }));
   } catch {
-    return { ...DETECTOR_DEFAULTS };
+    return { left: { ...DETECTOR_DEFAULTS }, right: { ...DETECTOR_DEFAULTS } };
   }
 }
 
 const detectorSettings = loadDetectorSettings();
+function loadZoneRestriction() {
+  if (typeof appSettings.restrictHitsToZones === 'boolean') return appSettings.restrictHitsToZones;
+  try { return localStorage.getItem('airDrums.restrictHitsToZones') !== 'false'; } catch { return true; }
+}
+restrictHitsToZones.checked = loadZoneRestriction();
 const audioPlayer = new LocalAudioPlayer(message => { audioStatus.textContent = message; });
 
 let media = null;
@@ -86,20 +123,178 @@ let layoutDirty = false;
 let editingBoundary = false;
 const filters = new Map();
 const strokeDetectors = new Map([
-  ['left', new StrokeDetector('left', detectorSettings)],
-  ['right', new StrokeDetector('right', detectorSettings)],
+  ['left', new StrokeDetector('left', detectorSettings.left)],
+  ['right', new StrokeDetector('right', detectorSettings.right)],
 ]);
 const targetPredictors = new Map([
   ['left', new TargetPredictor()],
   ['right', new TargetPredictor()],
 ]);
+const candidateObservers = new Map([
+  ['left', new CandidateObserver()],
+  ['right', new CandidateObserver()],
+]);
 const visibleHits = new Map();
 let totalHits = 0;
 let ignoredHits = 0;
+let outsideBoundaryHits = 0;
+let outsidePadHits = 0;
 let detectedStrokes = 0;
 let lastPredictionComparison = '';
 let strokeSessionId = null;
 let strokeWriteQueue = Promise.resolve();
+let activeCalibrationTrial = null;
+let calibrationTrials = [];
+let lastDetectedStroke = null;
+let lastAdjustment = null;
+
+function saveAppSettings() {
+  try {
+    const settings = {
+      delegate: delegateSelect.value,
+      responsiveness: Number(responseSlider.value),
+      inferenceWidth: inferenceSizeSelect.value,
+      showRaw: showRaw.checked,
+      showHandEstimate: showHandEstimate.checked,
+      handExtension: Number(handExtensionSlider.value),
+      audioEnabled: audioEnabled.checked,
+      audioVolume: Number(audioVolumeSlider.value),
+      restrictHitsToZones: restrictHitsToZones.checked,
+      autoAdjust: autoAdjustToggle.checked,
+      calibrationZone: calibrationZoneSelect.value,
+      calibrationHand: calibrationHandSelect.value,
+      selectedZoneId,
+      strokeSettings: detectorSettings,
+    };
+    localStorage.setItem('airDrums.appSettings', JSON.stringify(settings));
+  } catch {
+    // All controls still apply for this page if browser storage is unavailable.
+  }
+}
+
+function queueCalibrationTrial(trial) {
+  if (!strokeSessionId) return;
+  const sessionId = strokeSessionId;
+  strokeWriteQueue = strokeWriteQueue.then(() => fetch(`/api/sessions/${sessionId}/calibration-trials`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trial),
+  })).then(response => {
+    if (!response.ok) throw new Error(`Calibration record failed (${response.status})`);
+  }).catch(error => {
+    calibrationStatus.textContent = `Calibration record could not be saved: ${error.message}`;
+  });
+}
+
+function renderCalibrationSummary() {
+  const counts = Object.fromEntries(['correct', 'wrong_zone', 'outside_area', 'outside_zone', 'miss', 'tracking_loss', 'false_hit'].map(key => [key, 0]));
+  const mismatches = new Map();
+  let missesWithCandidate = 0;
+  for (const trial of calibrationTrials) counts[trial.outcome] = (counts[trial.outcome] ?? 0) + 1;
+  for (const trial of calibrationTrials) {
+    if (trial.outcome === 'miss' && (trial.peakSpeed !== null || trial.travel !== null)) missesWithCandidate += 1;
+    if (trial.outcome !== 'wrong_zone') continue;
+    const intended = kitLayout?.zones.find(zone => zone.id === trial.intendedZoneId)?.label ?? trial.intendedZoneId;
+    const actual = kitLayout?.zones.find(zone => zone.id === trial.actualZoneId)?.label ?? 'unknown';
+    const key = `${intended} → ${actual}`;
+    mismatches.set(key, (mismatches.get(key) ?? 0) + 1);
+  }
+  const zoneSummary = [...mismatches].map(([pair, count]) => `${pair} (${count})`).join(', ');
+  const handSummary = ['left', 'right'].map(hand => {
+    const handTrials = calibrationTrials.filter(trial => trial.hand === hand);
+    const hits = handTrials.filter(trial => trial.outcome === 'correct').length;
+    const misses = handTrials.filter(trial => trial.outcome === 'miss').length;
+    const falseHits = handTrials.filter(trial => trial.outcome === 'false_hit').length;
+    return `${hand === 'left' ? 'L' : 'R'} ${hits} hits / ${misses} misses / ${falseHits} false`;
+  }).join(' · ');
+  calibrationSummary.textContent = `Trials ${calibrationTrials.length} · Correct ${counts.correct} · Wrong drum ${counts.wrong_zone}${zoneSummary ? ` [${zoneSummary}]` : ''} · Outside rectangle ${counts.outside_area} · Outside pads ${counts.outside_zone} · Missed ${counts.miss} (${missesWithCandidate} with candidate motion, ${counts.miss - missesWithCandidate} without) · Tracking lost ${counts.tracking_loss} · False hits ${counts.false_hit} · ${handSummary}`;
+  markFalseHitButton.disabled = !lastDetectedStroke;
+}
+
+function postCalibrationTrial(trial) {
+  calibrationTrials.push(trial);
+  queueCalibrationTrial(trial);
+  renderCalibrationSummary();
+}
+
+function armCalibrationTrial() {
+  if (!strokeSessionId) {
+    calibrationStatus.textContent = 'Start the camera before arming a prompted tap.';
+    return;
+  }
+  activeCalibrationTrial = { intendedZoneId: calibrationZoneSelect.value, hand: calibrationHandSelect.value, candidate: null };
+  calibrationStatus.textContent = `Ready: tap ${calibrationZoneSelect.selectedOptions[0].text} with your ${calibrationHandSelect.value} hand. The next detected stroke will be compared with that drum.`;
+  promptTrialButton.disabled = true;
+  markMissedButton.disabled = false;
+  markTrackingLossButton.disabled = false;
+  cancelTrialButton.hidden = false;
+}
+
+function finishPromptedTrial(outcome, stroke = null, candidate = activeCalibrationTrial?.candidate) {
+  if (!activeCalibrationTrial) return;
+  const promptedHand = activeCalibrationTrial.hand;
+  const trial = {
+    timestamp: new Date().toISOString(),
+    intendedZoneId: activeCalibrationTrial.intendedZoneId,
+    outcome,
+    actualZoneId: stroke?.actualZoneId ?? null,
+    insideHitArea: stroke?.insideHitArea ?? null,
+    insideDrumZone: stroke?.insideDrumZone ?? null,
+    hand: stroke?.hand ?? candidate?.hand ?? promptedHand,
+    peakSpeed: stroke?.peakSpeed ?? candidate?.peakSpeed ?? null,
+    travel: stroke?.travel ?? candidate?.travel ?? null,
+  };
+  postCalibrationTrial(trial);
+  const intended = kitLayout?.zones.find(zone => zone.id === trial.intendedZoneId)?.label ?? trial.intendedZoneId;
+  const actual = kitLayout?.zones.find(zone => zone.id === trial.actualZoneId)?.label;
+  calibrationStatus.textContent = outcome === 'correct' ? `Correct · ${intended}`
+    : outcome === 'wrong_zone' ? `Zone mismatch · aimed ${intended}, detected ${actual ?? 'unknown'}`
+    : outcome === 'outside_area' ? `Stroke detected for ${intended}, outside the hit rectangle`
+      : outcome === 'outside_zone' ? `Stroke detected for ${intended}, outside all drum pads`
+        : outcome === 'tracking_loss' ? `Tracking lost during tap for ${intended}` : `Miss recorded for ${intended}`;
+  activeCalibrationTrial = null;
+  for (const observer of candidateObservers.values()) observer.reset();
+  promptTrialButton.disabled = false;
+  markMissedButton.disabled = true;
+  markTrackingLossButton.disabled = true;
+  cancelTrialButton.hidden = true;
+  if (outcome === 'miss' && autoAdjustToggle.checked && candidate) applyAutomaticAdjustment('miss', candidate, candidate.hand ?? promptedHand);
+}
+
+function applyAutomaticAdjustment(kind, measurement, hand) {
+  if (!hand || !detectorSettings[hand]) return;
+  const settings = detectorSettings[hand];
+  const before = { ...settings };
+  let field = null;
+  let direction = 0;
+  if (kind === 'miss') {
+    if (measurement.peakSpeed < settings.downThreshold && measurement.peakSpeed >= settings.downThreshold * 0.45) {
+      field = 'downThreshold'; direction = -0.05;
+    } else if (measurement.travel < settings.minTravel && measurement.travel >= settings.minTravel * 0.45) {
+      field = 'minTravel'; direction = -0.005;
+    }
+  } else {
+    if (measurement.travel < settings.minTravel * 1.35) {
+      field = 'minTravel'; direction = 0.005;
+    } else if (measurement.peakSpeed < settings.downThreshold * 1.35) {
+      field = 'downThreshold'; direction = 0.05;
+    }
+  }
+  if (!field) {
+    adjustmentReadout.textContent = 'No sensitivity change: this result did not identify a near-threshold stroke.';
+    return;
+  }
+  const [minimum, maximum] = DETECTOR_LIMITS[field];
+  const precision = field === 'downThreshold' ? 2 : 3;
+  const next = Math.max(minimum, Math.min(maximum, Number((settings[field] + direction).toFixed(precision))));
+  if (next === settings[field]) {
+    adjustmentReadout.textContent = 'Sensitivity is already at its allowed limit; no change applied.';
+    return;
+  }
+  lastAdjustment = { hand, before };
+  detectorControls[hand][field].slider.value = String(next);
+  updateDetectorSettings(hand);
+  adjustmentReadout.textContent = `${hand === 'left' ? 'Left' : 'Right'} hand · ${field === 'downThreshold' ? 'Speed threshold' : 'Minimum wrist travel'} ${before[field].toFixed(precision)} → ${next.toFixed(precision)} after a marked ${kind === 'miss' ? 'near-miss' : 'false hit'}.`;
+  revertAdjustmentButton.hidden = false;
+}
 
 function setStatus(text, state = 'idle') {
   status.textContent = text;
@@ -224,8 +419,20 @@ function drawPose(rawPose, filteredPose, width, height) {
   const aspectRatio = width / height;
   const extension = Number(handExtensionSlider.value) / 100;
   for (const hand of ['left', 'right']) {
+    const elbow = filteredPose[`${hand}Elbow`];
     const wrist = filteredPose[`${hand}Wrist`];
     if (!wrist) continue;
+    if (elbow) {
+      ctx.beginPath();
+      ctx.moveTo(elbow.x * width, elbow.y * height);
+      ctx.lineTo(wrist.x * width, wrist.y * height);
+      ctx.strokeStyle = '#43e0b5cc';
+      ctx.lineWidth = Math.max(3, width * 0.0035);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      if (showRaw.checked) drawDot(rawPose?.[`${hand}Elbow`], '', '#ffffff99', width, height, 4);
+      drawDot(elbow, '', POSE_COLORS.elbow, width, height, 5);
+    }
     if (showRaw.checked) drawDot(rawPose?.[`${hand}Wrist`], '', '#ffffff99', width, height, 4);
     drawDot(wrist, '', POSE_COLORS.wrist, width, height, 6);
     if (!showHandEstimate.checked) continue;
@@ -295,7 +502,15 @@ function detectStrokes(pose, timestampMs) {
   for (const hand of ['left', 'right']) {
     const point = pose?.[`${hand}Wrist`];
     const detector = strokeDetectors.get(hand);
+    const observer = candidateObservers.get(hand);
     const predictor = targetPredictors.get(hand);
+    const candidate = activeCalibrationTrial
+      ? observer.update(point, timestampMs, shoulderScale, aspectRatio, Math.min(detector.downThreshold * 0.5, 0.15))
+      : null;
+    if (candidate) {
+      candidate.hand = hand;
+      if (activeCalibrationTrial) activeCalibrationTrial.candidate = candidate;
+    }
     const priorPrediction = predictor.predictions;
     const result = detector.update(point, timestampMs, shoulderScale, aspectRatio);
     const wristPrediction = result.event ? priorPrediction : predictor.update(point, timestampMs, shoulderScale, aspectRatio, {
@@ -316,12 +531,15 @@ function detectStrokes(pose, timestampMs) {
     } : null;
     if (!result.event) predictor.predictions = prediction;
     if (result.event) {
+      observer.reset();
       detectedStrokes += 1;
       const hitPoint = estimatedPoint;
       result.event.x = hitPoint?.x ?? null;
       result.event.y = hitPoint?.y ?? null;
       result.event.insideHitArea = hitPoint ? isInsideStrikeBoundary(hitPoint) : false;
-      result.event.actualZoneId = hitPoint ? nearestZone(hitPoint)?.id ?? null : null;
+      const containedZone = hitPoint ? drumZoneAt(hitPoint) : null;
+      result.event.insideDrumZone = Boolean(containedZone);
+      result.event.actualZoneId = containedZone?.id ?? (hitPoint ? nearestZone(hitPoint)?.id ?? null : null);
       result.event.predictions = hitPoint ? comparePredictions(
         prediction || predictor.predictions,
         result.event,
@@ -337,7 +555,8 @@ function detectStrokes(pose, timestampMs) {
         return `${label} ${predictedZone} → ${actualZone}: ${item.positionErrorPx.toFixed(0)}px, ${item.timingErrorMs >= 0 ? '+' : ''}${item.timingErrorMs.toFixed(0)}ms`;
       });
       lastPredictionComparison = `${hand === 'left' ? 'L' : 'R'} impact · ${modelSummaries.join(' · ')}`;
-      if (result.event.insideHitArea) {
+      const acceptedByZone = !restrictHitsToZones.checked || result.event.insideDrumZone;
+      if (result.event.insideHitArea && acceptedByZone) {
         totalHits += 1;
         audioPlayer.play(result.event.actualZoneId);
         visibleHits.set(hand, { point: { x: hitPoint.x, y: hitPoint.y }, until: performance.now() + 280 });
@@ -345,56 +564,118 @@ function detectStrokes(pose, timestampMs) {
       } else {
         ignoredHits += 1;
       }
+      if (!result.event.insideHitArea) outsideBoundaryHits += 1;
+      else if (!result.event.insideDrumZone) outsidePadHits += 1;
       logStroke(result.event);
+      lastDetectedStroke = result.event;
+      markFalseHitButton.disabled = false;
+      if (activeCalibrationTrial) {
+        const outcome = !result.event.insideHitArea ? 'outside_area'
+          : restrictHitsToZones.checked && !result.event.insideDrumZone ? 'outside_zone'
+            : result.event.actualZoneId === activeCalibrationTrial.intendedZoneId ? 'correct' : 'wrong_zone';
+        finishPromptedTrial(outcome, result.event);
+      }
       predictor.reset();
     } else if (!prediction && result.state !== 'downswing') {
       predictor.predictions = null;
     }
   }
   updatePredictionReadout();
-  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Detected ${detectedStrokes} · Hits ${totalHits} · Outside ${ignoredHits}`;
+  strokeReadout.textContent = `Strokes: L ${strokeDetectors.get('left').state} · R ${strokeDetectors.get('right').state} · Detected ${detectedStrokes} · Hits ${totalHits} · Outside rectangle ${outsideBoundaryHits} · Outside pads ${outsidePadHits}`;
 }
 
-function updateDetectorSettings() {
-  detectorSettings.downThreshold = Number(downThresholdSlider.value);
-  detectorSettings.minTravel = Number(minTravelSlider.value);
-  detectorSettings.impactDrop = Number(impactDropSlider.value);
-  downThresholdValue.textContent = detectorSettings.downThreshold.toFixed(2);
-  minTravelValue.textContent = detectorSettings.minTravel.toFixed(3);
-  impactDropValue.textContent = detectorSettings.impactDrop.toFixed(2);
-  for (const detector of strokeDetectors.values()) Object.assign(detector, detectorSettings);
-  try {
-    localStorage.setItem('airDrums.strokeSettings', JSON.stringify(detectorSettings));
-  } catch {
-    // Settings still apply for this page even when browser storage is unavailable.
+function updateDetectorSettings(hand) {
+  const settings = detectorSettings[hand];
+  for (const key of Object.keys(DETECTOR_DEFAULTS)) {
+    settings[key] = Number(detectorControls[hand][key].slider.value);
   }
+  detectorControls[hand].downThreshold.value.textContent = settings.downThreshold.toFixed(2);
+  detectorControls[hand].minTravel.value.textContent = settings.minTravel.toFixed(3);
+  detectorControls[hand].impactDrop.value.textContent = settings.impactDrop.toFixed(2);
+  Object.assign(strokeDetectors.get(hand), settings);
+  saveAppSettings();
+}
+
+function saveZoneRestriction() {
+  saveAppSettings();
 }
 
 function initializeDetectorSettings() {
-  downThresholdSlider.value = detectorSettings.downThreshold;
-  minTravelSlider.value = detectorSettings.minTravel;
-  impactDropSlider.value = detectorSettings.impactDrop;
-  updateDetectorSettings();
+  for (const hand of ['left', 'right']) {
+    for (const key of Object.keys(DETECTOR_DEFAULTS)) detectorControls[hand][key].slider.value = detectorSettings[hand][key];
+    updateDetectorSettings(hand);
+  }
 }
 
 function resetDetectorSettings() {
-  Object.assign(detectorSettings, DETECTOR_DEFAULTS);
+  for (const hand of ['left', 'right']) Object.assign(detectorSettings[hand], DETECTOR_DEFAULTS);
   initializeDetectorSettings();
+}
+
+function cancelCalibrationTrial(message = 'Prompt cancelled.') {
+  activeCalibrationTrial = null;
+  for (const observer of candidateObservers.values()) observer.reset();
+  promptTrialButton.disabled = false;
+  markMissedButton.disabled = true;
+  markTrackingLossButton.disabled = true;
+  cancelTrialButton.hidden = true;
+  calibrationStatus.textContent = message;
+}
+
+function revertAutomaticAdjustment() {
+  if (!lastAdjustment) return;
+  const { hand, before } = lastAdjustment;
+  for (const key of Object.keys(DETECTOR_DEFAULTS)) detectorControls[hand][key].slider.value = String(before[key]);
+  updateDetectorSettings(hand);
+  lastAdjustment = null;
+  adjustmentReadout.textContent = `Last ${hand} hand automatic sensitivity adjustment reverted.`;
+  revertAdjustmentButton.hidden = true;
+}
+
+function markLastStrokeFalseHit() {
+  if (!lastDetectedStroke) return;
+  const stroke = lastDetectedStroke;
+  postCalibrationTrial({
+    timestamp: new Date().toISOString(), outcome: 'false_hit', intendedZoneId: null,
+    actualZoneId: stroke.actualZoneId, insideHitArea: stroke.insideHitArea,
+    insideDrumZone: stroke.insideDrumZone,
+    hand: stroke.hand, peakSpeed: stroke.peakSpeed, travel: stroke.travel,
+  });
+  calibrationStatus.textContent = 'Last detected stroke marked as a false hit.';
+  lastDetectedStroke = null;
+  markFalseHitButton.disabled = true;
+  if (autoAdjustToggle.checked) applyAutomaticAdjustment('false_hit', stroke, stroke.hand);
 }
 
 function loadVisualSettings() {
   try {
-    const inferenceWidth = localStorage.getItem('airDrums.inferenceWidth');
-    if (['480', '640'].includes(inferenceWidth)) inferenceSizeSelect.value = inferenceWidth;
-    const storedExtension = localStorage.getItem('airDrums.handExtension');
+    const inferenceWidth = appSettings.inferenceWidth ?? localStorage.getItem('airDrums.inferenceWidth');
+    if (['480', '640'].includes(String(inferenceWidth))) inferenceSizeSelect.value = String(inferenceWidth);
+    const storedExtension = appSettings.handExtension ?? localStorage.getItem('airDrums.handExtension');
     const extension = Number(storedExtension);
     if (storedExtension !== null && Number.isFinite(extension)) {
       handExtensionSlider.value = Math.max(0, Math.min(70, extension));
     }
-    showHandEstimate.checked = localStorage.getItem('airDrums.showHandEstimate') !== 'false';
+    const oldShowHandEstimate = localStorage.getItem('airDrums.showHandEstimate');
+    showHandEstimate.checked = typeof appSettings.showHandEstimate === 'boolean'
+      ? appSettings.showHandEstimate : oldShowHandEstimate !== 'false';
+    showRaw.checked = typeof appSettings.showRaw === 'boolean' ? appSettings.showRaw : false;
+    audioEnabled.checked = typeof appSettings.audioEnabled === 'boolean' ? appSettings.audioEnabled : audioEnabled.checked;
+    const audioVolume = Number(appSettings.audioVolume ?? audioVolumeSlider.value);
+    if (Number.isFinite(audioVolume)) audioVolumeSlider.value = Math.max(0, Math.min(100, audioVolume));
+    if (['auto', 'CPU'].includes(appSettings.delegate)) delegateSelect.value = appSettings.delegate;
+    if (Number.isFinite(Number(appSettings.responsiveness))) {
+      responseSlider.value = Math.max(0, Math.min(100, Number(appSettings.responsiveness)));
+    }
+    autoAdjustToggle.checked = appSettings.autoAdjust === true;
+    const zoneOptions = [...calibrationZoneSelect.options].map(option => option.value);
+    if (zoneOptions.includes(appSettings.calibrationZone)) calibrationZoneSelect.value = appSettings.calibrationZone;
+    if (['left', 'right'].includes(appSettings.calibrationHand)) calibrationHandSelect.value = appSettings.calibrationHand;
   } catch {
     // Keep the built-in defaults when browser storage is unavailable.
   }
+  responseValue.textContent = `${responseSlider.value}%`;
+  audioVolumeValue.textContent = `${audioVolumeSlider.value}%`;
   updateHandExtensionLabel();
 }
 
@@ -429,6 +710,10 @@ async function openStrokeSession() {
   const response = await fetch('/api/sessions', { method: 'POST' });
   if (!response.ok) throw new Error(`Recording setup failed (${response.status})`);
   strokeSessionId = (await response.json()).id;
+  calibrationTrials = [];
+  lastDetectedStroke = null;
+  renderCalibrationSummary();
+  calibrationStatus.textContent = 'Choose a drum and prompt a tap when ready.';
 }
 
 function closeStrokeSession() {
@@ -455,12 +740,12 @@ function drawKitLayout(width, height) {
         .some(prediction => prediction && nearestZone(prediction)?.id === zone.id));
     ctx.beginPath();
     ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
-    ctx.globalAlpha = editingLayout ? 0.20 : 0.12;
+    ctx.globalAlpha = editingLayout ? 0.28 : 0.22;
     ctx.fillStyle = zone.color;
     ctx.fill();
     ctx.globalAlpha = 1;
     ctx.setLineDash(editingLayout && selected ? [8, 5] : []);
-    ctx.lineWidth = highlighted ? 5 : selected && editingLayout ? 4 : 2;
+    ctx.lineWidth = highlighted ? 5 : selected && editingLayout ? 4 : 3;
     ctx.strokeStyle = highlighted ? '#fff' : zone.color;
     ctx.stroke();
     ctx.setLineDash([]);
@@ -541,6 +826,18 @@ function nearestZone(point) {
     const dy = (point.y - zone.y) * height / (zone.height * shortSide / 2);
     return { zone, distance: dx * dx + dy * dy };
   }).sort((a, b) => a.distance - b.distance)[0]?.zone || null;
+}
+
+function drumZoneAt(point) {
+  if (!kitLayout || !point) return null;
+  const width = canvas.width;
+  const height = canvas.height;
+  const shortSide = Math.min(width, height);
+  return kitLayout.zones.map(zone => {
+    const dx = (point.x - zone.x) * width / (zone.width * shortSide / 2);
+    const dy = (point.y - zone.y) * height / (zone.height * shortSide / 2);
+    return { zone, distance: dx * dx + dy * dy };
+  }).filter(item => item.distance <= 1).sort((a, b) => a.distance - b.distance)[0]?.zone ?? null;
 }
 
 function drawTargetPredictions(width, height) {
@@ -668,8 +965,10 @@ async function loadKitLayout() {
     if (!layoutResponse.ok || !defaultsResponse.ok) throw new Error('Could not load kit layout settings');
     kitLayout = await layoutResponse.json();
     defaultLayout = await defaultsResponse.json();
-    selectedZoneId = kitLayout.zones[0]?.id || null;
+    selectedZoneId = kitLayout.zones.some(zone => zone.id === appSettings.selectedZoneId)
+      ? appSettings.selectedZoneId : kitLayout.zones[0]?.id || null;
     updateZoneControls();
+    saveAppSettings();
     setLayoutDirty(false);
     requestRender();
   } catch (error) {
@@ -831,6 +1130,7 @@ function boundaryCornerAt(point, boundary) {
 
 function endZoneEdit(event) {
   if (dragging && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  if (dragging?.region && dragging.region !== kitLayout?.strikeBoundary) saveAppSettings();
   dragging = null;
 }
 
@@ -947,9 +1247,11 @@ function initializeWorker() {
   visibleHits.clear();
   totalHits = 0;
   ignoredHits = 0;
+  outsideBoundaryHits = 0;
+  outsidePadHits = 0;
   detectedStrokes = 0;
   lastPredictionComparison = '';
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0';
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside rectangle 0 · Outside pads 0';
   updatePredictionReadout();
   worker.postMessage({
     type: 'initialize',
@@ -1038,6 +1340,7 @@ async function start() {
 }
 
 function stop() {
+  if (activeCalibrationTrial) finishPromptedTrial('tracking_loss');
   closeStrokeSession();
   if (callbackId !== null) {
     if (callbackKind === 'video' && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callbackId);
@@ -1057,13 +1360,16 @@ function stop() {
   currentInference = null;
   filters.clear();
   for (const detector of strokeDetectors.values()) detector.reset();
+  for (const observer of candidateObservers.values()) observer.reset();
   for (const predictor of targetPredictors.values()) predictor.reset();
   lastPredictionComparison = '';
   visibleHits.clear();
   totalHits = 0;
   detectedStrokes = 0;
   ignoredHits = 0;
-  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside 0';
+  outsideBoundaryHits = 0;
+  outsidePadHits = 0;
+  strokeReadout.textContent = 'Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside rectangle 0 · Outside pads 0';
   updatePredictionReadout();
   processedFps = 0;
   displayDelayMs = 0;
@@ -1073,39 +1379,63 @@ function stop() {
   toggle.textContent = 'Start camera';
   toggle.disabled = false;
   setStatus('Camera is off');
+  lastDetectedStroke = null;
+  renderCalibrationSummary();
+  calibrationStatus.textContent = 'Start the camera to run prompted session calibration.';
 }
 
 toggle.addEventListener('click', () => media ? stop() : start());
-delegateSelect.addEventListener('change', () => { if (worker && media) initializeWorker(); });
-responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; });
+promptTrialButton.addEventListener('click', armCalibrationTrial);
+markMissedButton.addEventListener('click', () => finishPromptedTrial('miss'));
+markTrackingLossButton.addEventListener('click', () => finishPromptedTrial('tracking_loss'));
+cancelTrialButton.addEventListener('click', () => cancelCalibrationTrial());
+markFalseHitButton.addEventListener('click', markLastStrokeFalseHit);
+revertAdjustmentButton.addEventListener('click', revertAutomaticAdjustment);
+delegateSelect.addEventListener('change', () => {
+  saveAppSettings();
+  if (worker && media) initializeWorker();
+});
+responseSlider.addEventListener('input', () => { responseValue.textContent = `${responseSlider.value}%`; saveAppSettings(); });
 audioEnabled.addEventListener('change', () => {
   audioPlayer.enabled = audioEnabled.checked;
   if (audioPlayer.enabled) audioPlayer.activate();
+  saveAppSettings();
 });
 audioVolumeSlider.addEventListener('input', () => {
   const volume = Number(audioVolumeSlider.value) / 100;
   audioPlayer.setVolume(volume);
   audioVolumeValue.textContent = `${audioVolumeSlider.value}%`;
+  saveAppSettings();
 });
-for (const slider of [downThresholdSlider, minTravelSlider, impactDropSlider]) {
-  slider.addEventListener('input', updateDetectorSettings);
+for (const hand of ['left', 'right']) {
+  for (const key of Object.keys(DETECTOR_DEFAULTS)) {
+    detectorControls[hand][key].slider.addEventListener('input', () => updateDetectorSettings(hand));
+  }
 }
 resetStrokeSettingsButton.addEventListener('click', resetDetectorSettings);
+restrictHitsToZones.addEventListener('change', saveZoneRestriction);
+autoAdjustToggle.addEventListener('change', saveAppSettings);
+calibrationZoneSelect.addEventListener('change', saveAppSettings);
+calibrationHandSelect.addEventListener('change', saveAppSettings);
+loadVisualSettings();
 initializeDetectorSettings();
+markMissedButton.disabled = true;
+markTrackingLossButton.disabled = true;
+markFalseHitButton.disabled = true;
+renderCalibrationSummary();
 audioPlayer.enabled = audioEnabled.checked;
 audioPlayer.setVolume(Number(audioVolumeSlider.value) / 100);
 audioPlayer.prepare();
-loadVisualSettings();
 handExtensionSlider.addEventListener('input', () => {
-  try { localStorage.setItem('airDrums.handExtension', handExtensionSlider.value); } catch { /* optional */ }
   updateHandExtensionLabel();
+  saveAppSettings();
 });
 showHandEstimate.addEventListener('change', () => {
-  try { localStorage.setItem('airDrums.showHandEstimate', String(showHandEstimate.checked)); } catch { /* optional */ }
   requestRender();
+  saveAppSettings();
 });
 inferenceSizeSelect.addEventListener('change', () => {
-  try { localStorage.setItem('airDrums.inferenceWidth', inferenceSizeSelect.value); } catch { /* optional */ }
+  saveAppSettings();
 });
 layoutEdit.addEventListener('click', () => setEditingLayout(!editingLayout));
 boundaryEditButton.addEventListener('click', () => setEditingBoundary(!editingBoundary));
@@ -1116,14 +1446,16 @@ layoutReset.addEventListener('click', () => {
   selectedZoneId = kitLayout.zones[0]?.id || null;
   setEditingBoundary(false);
   updateZoneControls();
+  saveAppSettings();
   setLayoutDirty(true);
 });
 zoneSelect.addEventListener('change', () => {
   selectedZoneId = zoneSelect.value;
   updateZoneControls();
+  saveAppSettings();
   requestRender();
 });
-showRaw.addEventListener('change', requestRender);
+showRaw.addEventListener('change', () => { requestRender(); saveAppSettings(); });
 canvas.addEventListener('pointerdown', beginZoneEdit);
 canvas.addEventListener('pointermove', continueZoneEdit);
 canvas.addEventListener('pointerup', endZoneEdit);

@@ -36,7 +36,15 @@
       .calibration-heading { grid-column: 1 / -1; margin: 0; color: #e4eee6; font-size: .92rem; }
       .calibration .control { gap: .4rem; }
       .calibration input[type="range"] { width: 100%; accent-color: #9de9b3; }
+      .hand-settings { grid-column: 1 / -1; min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: .75rem 1rem; margin: 0; padding: .8rem; border: 1px solid #334038; border-radius: 10px; }
+      .hand-settings legend { padding: 0 .35rem; color: #dce9df; font-size: .86rem; font-weight: 700; }
       .calibration-help { grid-column: 1 / -1; margin: 0; color: #93a197; font-size: .76rem; }
+      .calibration-session { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: .7rem 1rem; padding-top: .8rem; border-top: 1px solid #2d3831; }
+      .calibration-session h3, .calibration-session p { grid-column: 1 / -1; margin: 0; }
+      .calibration-session h3 { color: #dce9df; font-size: .86rem; }
+      .calibration-session p { color: #aebdb2; font-size: .78rem; }
+      .calibration-session .check { padding: 0; }
+      .calibration-session button { justify-self: start; }
       select { min-width: 195px; border: 1px solid #3a463e; border-radius: 8px; padding: .55rem .7rem; background: #101613; color: #eff4ef; font: inherit; }
       .check { display: flex; align-items: center; gap: .45rem; color: #c7d4ca; font-size: .82rem; padding-bottom: .55rem; }
       .check input { accent-color: #9de9b3; }
@@ -73,7 +81,7 @@
         <div class="statusbar">
           <div>
             <div id="status" data-state="idle" role="status" aria-live="polite">Camera is off</div>
-            <div id="strokeReadout" aria-live="off">Strokes: L idle · R idle · Hits 0 · Outside 0</div>
+            <div id="strokeReadout" aria-live="off">Strokes: L idle · R idle · Detected 0 · Hits 0 · Outside rectangle 0 · Outside pads 0</div>
             <div id="predictionReadout" aria-live="off">Prediction · move into a downswing to see estimates</div>
           </div>
           <button id="toggle" type="button">Start camera</button>
@@ -100,6 +108,7 @@
           </label>
           <label class="check"><input id="showRaw" type="checkbox"> Show raw pose points</label>
           <label class="check"><input id="audioEnabled" type="checkbox" checked> Audio hits</label>
+          <label class="check"><input id="restrictHitsToZones" type="checkbox" checked> Require hit inside a drum pad</label>
           <label class="control" for="audioVolume">Audio volume <span id="audioVolumeValue">72%</span>
             <input id="audioVolume" type="range" min="0" max="100" value="72">
           </label>
@@ -120,26 +129,66 @@
         </div>
         <section class="calibration" aria-labelledby="calibrationHeading">
           <h2 class="calibration-heading" id="calibrationHeading">Stroke calibration</h2>
-          <label class="control" for="downThreshold">Downward speed threshold <span id="downThresholdValue">0.55</span>
-            <input id="downThreshold" type="range" min="0.20" max="1.50" step="0.05" value="0.55">
-          </label>
-          <label class="control" for="minTravel">Minimum wrist travel <span id="minTravelValue">0.050</span>
-            <input id="minTravel" type="range" min="0.015" max="0.120" step="0.005" value="0.050">
-          </label>
-          <label class="control" for="impactDrop">Impact turn sensitivity <span id="impactDropValue">0.62</span>
-            <input id="impactDrop" type="range" min="0.35" max="0.90" step="0.01" value="0.62">
-          </label>
+          <fieldset class="hand-settings">
+            <legend>Left hand</legend>
+            <label class="control" for="leftDownThreshold">Downward speed threshold <span id="leftDownThresholdValue">0.55</span>
+              <input id="leftDownThreshold" type="range" min="0.20" max="1.50" step="0.05" value="0.55">
+            </label>
+            <label class="control" for="leftMinTravel">Minimum wrist travel <span id="leftMinTravelValue">0.050</span>
+              <input id="leftMinTravel" type="range" min="0.015" max="0.120" step="0.005" value="0.050">
+            </label>
+            <label class="control" for="leftImpactDrop">Impact turn sensitivity <span id="leftImpactDropValue">0.62</span>
+              <input id="leftImpactDrop" type="range" min="0.35" max="0.90" step="0.01" value="0.62">
+            </label>
+          </fieldset>
+          <fieldset class="hand-settings">
+            <legend>Right hand</legend>
+            <label class="control" for="rightDownThreshold">Downward speed threshold <span id="rightDownThresholdValue">0.55</span>
+              <input id="rightDownThreshold" type="range" min="0.20" max="1.50" step="0.05" value="0.55">
+            </label>
+            <label class="control" for="rightMinTravel">Minimum wrist travel <span id="rightMinTravelValue">0.050</span>
+              <input id="rightMinTravel" type="range" min="0.015" max="0.120" step="0.005" value="0.050">
+            </label>
+            <label class="control" for="rightImpactDrop">Impact turn sensitivity <span id="rightImpactDropValue">0.62</span>
+              <input id="rightImpactDrop" type="range" min="0.35" max="0.90" step="0.01" value="0.62">
+            </label>
+          </fieldset>
           <button class="secondary" id="resetStrokeSettings" type="button">Reset stroke settings</button>
-          <p class="calibration-help">Lower speed and travel thresholds count gentler strokes. Higher impact sensitivity detects the turnaround sooner. Changes apply immediately and are saved in this browser. These controls tune wrist stroke detection; the hit rectangle still decides whether the estimated hand point is accepted.</p>
+          <p class="calibration-help">Each hand has independent thresholds, saved in this browser. Lower speed and travel thresholds count gentler strokes; higher impact sensitivity detects the turnaround sooner. When “Require hit inside a drum pad” is checked, the estimated point must be inside both the rectangular hit area and one drum oval; uncheck it to use only the rectangle.</p>
+          <div class="calibration-session" aria-labelledby="sessionCalibrationHeading">
+            <h3 id="sessionCalibrationHeading">Prompted session calibration</h3>
+            <label class="control" for="calibrationZone">Ask for a tap on
+              <select id="calibrationZone">
+                <option value="snare">Snare</option><option value="hi_hat">Hi-hat</option>
+                <option value="tom_1">Tom 1</option><option value="tom_2">Tom 2</option>
+                <option value="floor_tom">Floor tom</option><option value="crash">Crash</option>
+                <option value="ride">Ride</option>
+              </select>
+            </label>
+            <label class="control" for="calibrationHand">Use hand
+              <select id="calibrationHand"><option value="left">Left</option><option value="right">Right</option></select>
+            </label>
+            <button id="promptTrial" type="button">Prompt tap</button>
+            <button class="secondary" id="markMissed" type="button" disabled>Mark missed</button>
+            <button class="secondary" id="markTrackingLoss" type="button" disabled>Mark tracking lost</button>
+            <button class="secondary" id="cancelTrial" type="button" hidden>Cancel prompt</button>
+            <button class="secondary" id="markFalseHit" type="button" disabled>Mark last stroke false</button>
+            <label class="check"><input id="autoAdjust" type="checkbox"> Automatic sensitivity adjustment</label>
+            <p id="calibrationStatus" role="status" aria-live="polite">Start the camera, choose a drum, and prompt a few short taps. Detected taps are compared with the intended zone; mark misses or tracking loss yourself.</p>
+            <p id="calibrationSummary" aria-live="polite">Trials 0</p>
+            <p id="adjustmentReadout" role="status" aria-live="polite">Automatic adjustment is off. Sensitivity and hit-area/zone results are reported separately.</p>
+            <button class="secondary" id="revertAdjustment" type="button" hidden>Revert last automatic adjustment</button>
+          </div>
         </section>
       </section>
       <div class="legend" aria-label="Marker legend">
+        <span><i class="swatch" style="background:#43e0b5"></i>Pose elbow / forearm</span>
         <span><i class="swatch" style="background:#f5cb5c"></i>Pose wrist</span>
         <span><i class="swatch" style="background:#ff9e64"></i>Estimated hand point</span>
         <span><i class="swatch" style="background:#55e8e0"></i>120 ms estimate</span>
         <span><i class="swatch" style="background:#ff80d5"></i>Impact-turn estimate</span>
       </div>
-      <p class="hint">Move your wrists down and let them rebound. The orange marker extends from the Pose wrist along the forearm direction to estimate the hand end; adjust its length or hide it with <strong>Show estimated hand point</strong>. This rough estimate uses one tracking model and does not follow wrist flexion. Choose a lower processing resolution to reduce vision work while leaving the camera preview at its negotiated size. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the hit rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. The rectangle is visible only while editing. Camera frames and per-frame landmarks are not recorded.</p>
+      <p class="hint">Move your wrists down and let them rebound. The green line shows Pose elbow-to-wrist tracking. The orange marker extends from the wrist along the forearm direction to estimate the hand end; adjust its length or hide it with <strong>Show estimated hand point</strong>. This rough estimate uses one tracking model and does not follow wrist flexion. Choose a lower processing resolution to reduce vision work while leaving the camera preview at its negotiated size. During a downswing, the 120 ms estimate and impact-turn estimate show projected endpoints and their nearest kit zones. Each detected impact reports both models’ endpoint and timing errors. Hits inside the hit rectangle receive a HIT marker; detected strokes outside it are also recorded for prediction review. The rectangle is visible only while editing. Camera frames and per-frame landmarks are not recorded.</p>
       <p class="layout-help" id="layoutHelp" role="status" aria-live="polite">Loading saved kit layout…</p>
       <p class="note" id="audioStatus" role="status" aria-live="polite">Preparing local drum sounds…</p>
       <p class="note" id="delegateNote">Tracking runs in a browser Web Worker; Docker serves the app, models, and WASM locally.</p>

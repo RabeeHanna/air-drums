@@ -96,6 +96,17 @@ async def post_stroke(request: web.Request) -> web.Response:
     return web.json_response({"queued": True, "stroke": stroke}, status=202)
 
 
+async def post_calibration_trial(request: web.Request) -> web.Response:
+    try:
+        value = await request.json()
+        trial = request.app[RECORDER].enqueue_calibration_trial(request.match_info["session_id"], value)
+    except (web.HTTPBadRequest, ValueError) as error:
+        raise web.HTTPBadRequest(text=str(error)) from error
+    except RecordingQueueFull as error:
+        raise web.HTTPServiceUnavailable(text=str(error)) from error
+    return web.json_response({"queued": True, "trial": trial}, status=202)
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.cleanup_ctx.append(recording_lifecycle)
@@ -109,6 +120,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/sessions/{session_id}", get_session_details)
     app.router.add_post("/api/sessions/{session_id}/finish", close_session)
     app.router.add_post("/api/sessions/{session_id}/strokes", post_stroke)
+    app.router.add_post("/api/sessions/{session_id}/calibration-trials", post_calibration_trial)
     app.router.add_static("/assets/", STATIC / "assets", show_index=False)
     app.router.add_static("/", STATIC, show_index=False)
     return app

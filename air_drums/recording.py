@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .strokes import initialize_database, validate_stroke, write_stroke_batch
+from .strokes import initialize_database, validate_calibration_trial, validate_stroke, write_stroke_batch
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +42,14 @@ class StrokeRecorder:
         except asyncio.QueueFull as error:
             raise RecordingQueueFull("stroke recording queue is full") from error
         return stroke
+
+    def enqueue_calibration_trial(self, session_id: str, value: Any) -> dict[str, Any]:
+        trial = validate_calibration_trial(value)
+        try:
+            self.queue.put_nowait({"kind": "calibration", "sessionId": session_id, "trial": trial})
+        except asyncio.QueueFull as error:
+            raise RecordingQueueFull("stroke recording queue is full") from error
+        return trial
 
     async def enqueue_finish(self, session_id: str) -> None:
         await self.queue.put({
